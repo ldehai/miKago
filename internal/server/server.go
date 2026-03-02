@@ -15,17 +15,22 @@ import (
 
 // Server is the TCP server that speaks the Kafka binary protocol.
 type Server struct {
-	addr     string
-	handler  *api.Handler
-	listener net.Listener
-	wg       sync.WaitGroup
+	addr            string
+	handler         *api.Handler
+	listener        net.Listener
+	wg              sync.WaitGroup
+	maxRequestBytes int32
 }
 
 // NewServer creates a new Server.
-func NewServer(addr string, handler *api.Handler) *Server {
+func NewServer(addr string, handler *api.Handler, maxRequestBytes int32) *Server {
+	if maxRequestBytes <= 0 {
+		maxRequestBytes = 100 * 1024 * 1024 // 100MB default
+	}
 	return &Server{
-		addr:    addr,
-		handler: handler,
+		addr:            addr,
+		handler:         handler,
+		maxRequestBytes: maxRequestBytes,
 	}
 }
 
@@ -93,7 +98,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		msgSize := binary.BigEndian.Uint32(sizeBuf)
-		if msgSize == 0 || msgSize > 100*1024*1024 { // max 100MB message
+		if msgSize == 0 || msgSize > uint32(s.maxRequestBytes) {
 			log.Printf("[miKago] Invalid message size %d from %s", msgSize, remoteAddr)
 			return
 		}

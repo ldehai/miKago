@@ -28,9 +28,15 @@ type Partition struct {
 }
 
 // NewPartition creates a new partition, opening or recovering the log from disk.
-func NewPartition(id int32, dataDir string) (*Partition, error) {
+func NewPartition(id int32, dataDir string, logSegmentBytes int64) (*Partition, error) {
 	dir := filepath.Join(dataDir, fmt.Sprintf("%d", id))
-	l, err := storage.NewLog(dir)
+	var l *storage.Log
+	var err error
+	if logSegmentBytes > 0 {
+		l, err = storage.NewLogWithConfig(dir, logSegmentBytes)
+	} else {
+		l, err = storage.NewLog(dir)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open partition %d log: %w", id, err)
 	}
@@ -113,16 +119,18 @@ func (t *Topic) Close() error {
 
 // TopicManager manages all topics and their partitions.
 type TopicManager struct {
-	mu      sync.RWMutex
-	topics  map[string]*Topic
-	dataDir string
+	mu              sync.RWMutex
+	topics          map[string]*Topic
+	dataDir         string
+	logSegmentBytes int64
 }
 
 // NewTopicManager creates a new TopicManager and recovers existing topics from disk.
-func NewTopicManager(dataDir string) *TopicManager {
+func NewTopicManager(dataDir string, logSegmentBytes int64) *TopicManager {
 	tm := &TopicManager{
-		topics:  make(map[string]*Topic),
-		dataDir: dataDir,
+		topics:          make(map[string]*Topic),
+		dataDir:         dataDir,
+		logSegmentBytes: logSegmentBytes,
 	}
 	tm.recoverFromDisk()
 	return tm
@@ -170,7 +178,7 @@ func (tm *TopicManager) recoverFromDisk() {
 
 		partitions := make([]*Partition, len(partIDs))
 		for i, pid := range partIDs {
-			p, err := NewPartition(int32(pid), topicDir)
+			p, err := NewPartition(int32(pid), topicDir, tm.logSegmentBytes)
 			if err != nil {
 				log.Printf("[miKago] Warning: cannot recover partition %d of topic %s: %v", pid, topicName, err)
 				continue
@@ -206,7 +214,7 @@ func (tm *TopicManager) CreateTopic(name string, numPartitions int) (*Topic, err
 	topicDir := tm.topicDir(name)
 	partitions := make([]*Partition, numPartitions)
 	for i := 0; i < numPartitions; i++ {
-		p, err := NewPartition(int32(i), topicDir)
+		p, err := NewPartition(int32(i), topicDir, tm.logSegmentBytes)
 		if err != nil {
 			// Cleanup already created partitions
 			for j := 0; j < i; j++ {
@@ -235,7 +243,7 @@ func (tm *TopicManager) GetOrCreateTopic(name string) *Topic {
 	}
 
 	topicDir := tm.topicDir(name)
-	p, err := NewPartition(0, topicDir)
+	p, err := NewPartition(0, topicDir, tm.logSegmentBytes)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create partition for topic %q: %v", name, err))
 	}

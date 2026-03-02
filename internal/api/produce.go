@@ -77,6 +77,17 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 				return nil, err
 			}
 
+			// Check message size limit
+			if int32(len(recordSet)) > b.Config.MaxMessageBytes {
+				pResults = append(pResults, partitionResult{
+					partition:  partitionID,
+					errCode:    protocol.ErrMessageTooLarge,
+					baseOffset: -1,
+					appendTime: -1,
+				})
+				continue
+			}
+
 			if int(partitionID) >= len(topic.Partitions) || partitionID < 0 {
 				pResults = append(pResults, partitionResult{
 					partition:  partitionID,
