@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -19,14 +20,15 @@ const (
 // Segment represents a pair of .log and .index files for a contiguous
 // range of message offsets.
 type Segment struct {
-	baseOffset  int64    // first offset in this segment
-	nextOffset  int64    // next offset to be written
-	logFile     *os.File // append-only message data
-	indexFile   *os.File // sparse offset → position index
-	logSize     int64    // current size of log file in bytes
-	indexCount  int      // number of index entries written
-	recordCount int      // number of records since last index entry
-	dir         string   // directory path
+	baseOffset    int64     // first offset in this segment
+	nextOffset    int64     // next offset to be written
+	logFile       *os.File  // append-only message data
+	indexFile     *os.File  // sparse offset → position index
+	logSize       int64     // current size of log file in bytes
+	indexCount    int       // number of index entries written
+	recordCount   int       // number of records since last index entry
+	dir           string    // directory path
+	lastTimestamp time.Time // timestamp of the last record written
 }
 
 // segmentFileName generates the 20-digit zero-padded filename for a segment.
@@ -100,6 +102,7 @@ func (s *Segment) Recover() error {
 			return fmt.Errorf("recover record: %w", err)
 		}
 		lastOffset = rec.Offset
+		s.lastTimestamp = rec.Timestamp
 		count++
 	}
 
@@ -138,6 +141,7 @@ func (s *Segment) Append(rec *Record) (int64, error) {
 	s.logSize += recordSize
 	s.nextOffset = rec.Offset + 1
 	s.recordCount++
+	s.lastTimestamp = rec.Timestamp
 
 	return position, nil
 }
@@ -289,4 +293,23 @@ func (s *Segment) Close() error {
 		return err
 	}
 	return s.indexFile.Close()
+}
+
+// LastTimestamp returns the timestamp of the last record in this segment.
+func (s *Segment) LastTimestamp() time.Time {
+	return s.lastTimestamp
+}
+
+// DeleteFiles closes and removes both .log and .index files.
+func (s *Segment) DeleteFiles() error {
+	s.Close()
+	logPath := filepath.Join(s.dir, segmentFileName(s.baseOffset, ".log"))
+	idxPath := filepath.Join(s.dir, segmentFileName(s.baseOffset, ".index"))
+	if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove log %s: %w", logPath, err)
+	}
+	if err := os.Remove(idxPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove index %s: %w", idxPath, err)
+	}
+	return nil
 }

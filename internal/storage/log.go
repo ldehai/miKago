@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,10 +25,10 @@ type Log struct {
 	segments        []*Segment
 	activeSegment   *Segment
 	maxSegmentBytes int64
+	stopCh          chan struct{}
 }
 
 // NewLog creates or opens a log in the given directory.
-// On startup, it discovers existing segments and recovers state.
 func NewLog(dir string) (*Log, error) {
 	return NewLogWithConfig(dir, DefaultMaxSegmentBytes)
 }
@@ -41,13 +42,13 @@ func NewLogWithConfig(dir string, maxSegmentBytes int64) (*Log, error) {
 	l := &Log{
 		dir:             dir,
 		maxSegmentBytes: maxSegmentBytes,
+		stopCh:          make(chan struct{}),
 	}
 
 	if err := l.recover(); err != nil {
 		return nil, fmt.Errorf("recover log: %w", err)
 	}
 
-	// If no segments exist, create the first one
 	if len(l.segments) == 0 {
 		seg, err := NewSegment(dir, 0)
 		if err != nil {
@@ -60,6 +61,66 @@ func NewLogWithConfig(dir string, maxSegmentBytes int64) (*Log, error) {
 	return l, nil
 }
 
+// StartRetentionCleaner starts a background goroutine that periodically
+// cleans up expired segments.
+func (l *Log) StartRetentionCleaner(retentionMs int64, intervalMs int64) {
+	if retentionMs <= 0 {
+		return
+	}
+	if intervalMs <= 0 {
+		intervalMs = 60000
+	}
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(intervalMs) * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				deleted := l.CleanExpired(retentionMs)
+				if deleted > 0 {
+					log.Printf("[miKago] Cleaned %d expired segment(s) in %s", deleted, l.dir)
+				}
+			case <-l.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+// CleanExpired removes segments whose last record is older than retentionMs.
+// Never deletes the active (writable) segment. Returns count of deleted segments.
+func (l *Log) CleanExpired(retentionMs int64) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(l.segments) <= 1 {
+		return 0
+	}
+
+	cutoff := time.Now().Add(-time.Duration(retentionMs) * time.Millisecond)
+	deleted := 0
+	var remaining []*Segment
+
+	for i, seg := range l.segments {
+		isActive := i == len(l.segments)-1
+		if !isActive && !seg.lastTimestamp.IsZero() && seg.lastTimestamp.Before(cutoff) {
+			if err := seg.DeleteFiles(); err != nil {
+				log.Printf("[miKago] Error deleting segment %d: %v", seg.baseOffset, err)
+				remaining = append(remaining, seg)
+			} else {
+				deleted++
+			}
+		} else {
+			remaining = append(remaining, seg)
+		}
+	}
+
+	l.segments = remaining
+	return deleted
+}
+
 // recover discovers existing segment files and recovers state.
 func (l *Log) recover() error {
 	entries, err := os.ReadDir(l.dir)
@@ -67,7 +128,6 @@ func (l *Log) recover() error {
 		return fmt.Errorf("read dir %s: %w", l.dir, err)
 	}
 
-	// Find all base offsets from .log files
 	baseOffsets := make([]int64, 0)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
@@ -85,7 +145,6 @@ func (l *Log) recover() error {
 		return baseOffsets[i] < baseOffsets[j]
 	})
 
-	// Open and recover each segment
 	for _, baseOffset := range baseOffsets {
 		seg, err := NewSegment(l.dir, baseOffset)
 		if err != nil {
@@ -110,7 +169,6 @@ func (l *Log) Append(key, value []byte) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Roll segment if needed
 	if l.activeSegment.Size() >= l.maxSegmentBytes {
 		if err := l.rollSegment(); err != nil {
 			return 0, fmt.Errorf("roll segment: %w", err)
@@ -132,7 +190,6 @@ func (l *Log) Append(key, value []byte) (int64, error) {
 	return offset, nil
 }
 
-// rollSegment creates a new active segment.
 func (l *Log) rollSegment() error {
 	if err := l.activeSegment.Flush(); err != nil {
 		return err
@@ -150,18 +207,15 @@ func (l *Log) rollSegment() error {
 }
 
 // Fetch retrieves records starting from startOffset, up to maxBytes.
-// Searches across segments to find the right starting point.
 func (l *Log) Fetch(startOffset int64, maxBytes int32) ([]*Record, int64) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	hwm := l.activeSegment.NextOffset()
-
 	if startOffset >= hwm || len(l.segments) == 0 {
 		return nil, hwm
 	}
 
-	// Find the segment containing startOffset using binary search
 	segIdx := l.findSegment(startOffset)
 	if segIdx < 0 {
 		return nil, hwm
@@ -170,7 +224,6 @@ func (l *Log) Fetch(startOffset int64, maxBytes int32) ([]*Record, int64) {
 	var allRecords []*Record
 	var totalSize int32
 
-	// Read from the found segment and subsequent segments
 	for i := segIdx; i < len(l.segments); i++ {
 		remaining := maxBytes - totalSize
 		if remaining <= 0 {
@@ -191,7 +244,6 @@ func (l *Log) Fetch(startOffset int64, maxBytes int32) ([]*Record, int64) {
 			totalSize += recSize
 		}
 
-		// For next segment, start from its base offset
 		if i+1 < len(l.segments) {
 			startOffset = l.segments[i+1].BaseOffset()
 		}
@@ -200,14 +252,12 @@ func (l *Log) Fetch(startOffset int64, maxBytes int32) ([]*Record, int64) {
 	return allRecords, hwm
 }
 
-// findSegment returns the index of the segment that contains (or could contain) the given offset.
 func (l *Log) findSegment(offset int64) int {
 	n := len(l.segments)
 	if n == 0 {
 		return -1
 	}
 
-	// Binary search: find the last segment with baseOffset <= offset
 	idx := sort.Search(n, func(i int) bool {
 		return l.segments[i].BaseOffset() > offset
 	})
@@ -232,8 +282,14 @@ func (l *Log) Flush() error {
 	return l.activeSegment.Flush()
 }
 
-// Close closes all segments.
+// Close closes all segments and stops the retention cleaner.
 func (l *Log) Close() error {
+	select {
+	case <-l.stopCh:
+	default:
+		close(l.stopCh)
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 

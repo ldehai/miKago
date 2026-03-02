@@ -267,3 +267,47 @@ func TestLogSegmentFiles(t *testing.T) {
 	t.Logf("✅ %d segment files on disk", len(files))
 	l.Close()
 }
+
+func TestLogRetentionCleanup(t *testing.T) {
+	dir := t.TempDir()
+
+	// Small segments to force multiple
+	l, err := NewLogWithConfig(dir, 100)
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+
+	// Write 20 records to create multiple segments
+	for i := 0; i < 20; i++ {
+		l.Append([]byte("k"), []byte("retention-test"))
+	}
+
+	segsBefore := l.SegmentCount()
+	if segsBefore <= 1 {
+		t.Fatalf("expected multiple segments, got %d", segsBefore)
+	}
+
+	// Manually backdate old segments' timestamps
+	l.mu.Lock()
+	for i := 0; i < len(l.segments)-1; i++ {
+		l.segments[i].lastTimestamp = time.Now().Add(-48 * time.Hour) // 2 days ago
+	}
+	l.mu.Unlock()
+
+	// Clean with 24h retention — should delete all but active segment
+	deleted := l.CleanExpired(24 * 60 * 60 * 1000) // 24 hours in ms
+	segsAfter := l.SegmentCount()
+
+	if deleted == 0 {
+		t.Fatal("expected some segments to be deleted")
+	}
+	if segsAfter >= segsBefore {
+		t.Fatalf("expected fewer segments after cleanup: before=%d, after=%d", segsBefore, segsAfter)
+	}
+	if segsAfter < 1 {
+		t.Fatal("active segment was deleted!")
+	}
+
+	t.Logf("✅ Retention cleanup: %d → %d segments, deleted %d", segsBefore, segsAfter, deleted)
+	l.Close()
+}
