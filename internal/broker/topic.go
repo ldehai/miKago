@@ -2,33 +2,43 @@ package broker
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"sync"
-	"time"
+
+	"github.com/andy/mikago/internal/storage"
 )
 
-// Message represents a single message stored in a partition.
+// Message represents a single message returned from a partition fetch.
 type Message struct {
 	Offset    int64
 	Key       []byte
 	Value     []byte
-	Timestamp time.Time
+	Timestamp interface{ UnixMilli() int64 }
 }
 
-// Partition is an append-only in-memory message log.
+// Partition is an append-only message log backed by disk storage.
 type Partition struct {
-	mu       sync.RWMutex
-	id       int32
-	messages []Message
-	nextOff  int64
+	mu  sync.RWMutex
+	id  int32
+	log *storage.Log
 }
 
-// NewPartition creates a new empty partition.
-func NewPartition(id int32) *Partition {
-	return &Partition{
-		id:       id,
-		messages: make([]Message, 0, 256),
-		nextOff:  0,
+// NewPartition creates a new partition, opening or recovering the log from disk.
+func NewPartition(id int32, dataDir string) (*Partition, error) {
+	dir := filepath.Join(dataDir, fmt.Sprintf("%d", id))
+	l, err := storage.NewLog(dir)
+	if err != nil {
+		return nil, fmt.Errorf("open partition %d log: %w", id, err)
 	}
+
+	return &Partition{
+		id:  id,
+		log: l,
+	}, nil
 }
 
 // ID returns the partition ID.
@@ -41,14 +51,11 @@ func (p *Partition) Append(key, value []byte) int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	offset := p.nextOff
-	p.messages = append(p.messages, Message{
-		Offset:    offset,
-		Key:       key,
-		Value:     value,
-		Timestamp: time.Now(),
-	})
-	p.nextOff++
+	offset, err := p.log.Append(key, value)
+	if err != nil {
+		// In production, we'd handle this more gracefully
+		panic(fmt.Sprintf("failed to append to partition %d: %v", p.id, err))
+	}
 	return offset
 }
 
@@ -58,40 +65,34 @@ func (p *Partition) Fetch(startOffset int64, maxBytes int32) ([]Message, int64) 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	hwm := p.nextOff
-
-	if startOffset >= hwm || len(p.messages) == 0 {
+	records, hwm := p.log.Fetch(startOffset, maxBytes)
+	if len(records) == 0 {
 		return nil, hwm
 	}
 
-	// Find the starting index (offset == index in our simple model)
-	startIdx := int(startOffset)
-	if startIdx < 0 {
-		startIdx = 0
-	}
-	if startIdx >= len(p.messages) {
-		return nil, hwm
-	}
-
-	var result []Message
-	var totalSize int32
-	for i := startIdx; i < len(p.messages); i++ {
-		msgSize := int32(len(p.messages[i].Key) + len(p.messages[i].Value) + 26) // overhead estimate
-		if totalSize+msgSize > maxBytes && len(result) > 0 {
-			break
+	messages := make([]Message, len(records))
+	for i, rec := range records {
+		messages[i] = Message{
+			Offset:    rec.Offset,
+			Key:       rec.Key,
+			Value:     rec.Value,
+			Timestamp: rec.Timestamp,
 		}
-		result = append(result, p.messages[i])
-		totalSize += msgSize
 	}
 
-	return result, hwm
+	return messages, hwm
 }
 
 // HighWaterMark returns the next offset to be written.
 func (p *Partition) HighWaterMark() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.nextOff
+	return p.log.HighWaterMark()
+}
+
+// Close flushes and closes the partition's log.
+func (p *Partition) Close() error {
+	return p.log.Close()
 }
 
 // Topic holds one or more partitions.
@@ -100,17 +101,96 @@ type Topic struct {
 	Partitions []*Partition
 }
 
-// TopicManager manages all topics and their partitions.
-type TopicManager struct {
-	mu     sync.RWMutex
-	topics map[string]*Topic
+// Close closes all partitions in the topic.
+func (t *Topic) Close() error {
+	for _, p := range t.Partitions {
+		if err := p.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// NewTopicManager creates a new TopicManager.
-func NewTopicManager() *TopicManager {
-	return &TopicManager{
-		topics: make(map[string]*Topic),
+// TopicManager manages all topics and their partitions.
+type TopicManager struct {
+	mu      sync.RWMutex
+	topics  map[string]*Topic
+	dataDir string
+}
+
+// NewTopicManager creates a new TopicManager and recovers existing topics from disk.
+func NewTopicManager(dataDir string) *TopicManager {
+	tm := &TopicManager{
+		topics:  make(map[string]*Topic),
+		dataDir: dataDir,
 	}
+	tm.recoverFromDisk()
+	return tm
+}
+
+// recoverFromDisk scans the data directory for existing topics and partitions.
+func (tm *TopicManager) recoverFromDisk() {
+	topicsDir := filepath.Join(tm.dataDir, "topics")
+	entries, err := os.ReadDir(topicsDir)
+	if err != nil {
+		// No topics directory yet — fresh start
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		topicName := entry.Name()
+		topicDir := filepath.Join(topicsDir, topicName)
+
+		// Discover partitions
+		partEntries, err := os.ReadDir(topicDir)
+		if err != nil {
+			log.Printf("[miKago] Warning: cannot read topic dir %s: %v", topicDir, err)
+			continue
+		}
+
+		var partIDs []int
+		for _, pe := range partEntries {
+			if !pe.IsDir() {
+				continue
+			}
+			id, err := strconv.Atoi(pe.Name())
+			if err != nil {
+				continue
+			}
+			partIDs = append(partIDs, id)
+		}
+		sort.Ints(partIDs)
+
+		if len(partIDs) == 0 {
+			continue
+		}
+
+		partitions := make([]*Partition, len(partIDs))
+		for i, pid := range partIDs {
+			p, err := NewPartition(int32(pid), topicDir)
+			if err != nil {
+				log.Printf("[miKago] Warning: cannot recover partition %d of topic %s: %v", pid, topicName, err)
+				continue
+			}
+			partitions[i] = p
+		}
+
+		topic := &Topic{
+			Name:       topicName,
+			Partitions: partitions,
+		}
+		tm.topics[topicName] = topic
+		log.Printf("[miKago] Recovered topic %q with %d partition(s), hwm=%d",
+			topicName, len(partitions), partitions[len(partitions)-1].HighWaterMark())
+	}
+}
+
+// topicDir returns the directory for a topic's data.
+func (tm *TopicManager) topicDir(name string) string {
+	return filepath.Join(tm.dataDir, "topics", name)
 }
 
 // CreateTopic creates a topic with the given number of partitions.
@@ -123,9 +203,18 @@ func (tm *TopicManager) CreateTopic(name string, numPartitions int) (*Topic, err
 		return nil, fmt.Errorf("topic %q already exists", name)
 	}
 
+	topicDir := tm.topicDir(name)
 	partitions := make([]*Partition, numPartitions)
 	for i := 0; i < numPartitions; i++ {
-		partitions[i] = NewPartition(int32(i))
+		p, err := NewPartition(int32(i), topicDir)
+		if err != nil {
+			// Cleanup already created partitions
+			for j := 0; j < i; j++ {
+				partitions[j].Close()
+			}
+			return nil, fmt.Errorf("create partition %d: %w", i, err)
+		}
+		partitions[i] = p
 	}
 
 	topic := &Topic{
@@ -145,10 +234,15 @@ func (tm *TopicManager) GetOrCreateTopic(name string) *Topic {
 		return t
 	}
 
-	partitions := []*Partition{NewPartition(0)}
+	topicDir := tm.topicDir(name)
+	p, err := NewPartition(0, topicDir)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create partition for topic %q: %v", name, err))
+	}
+
 	topic := &Topic{
 		Name:       name,
-		Partitions: partitions,
+		Partitions: []*Partition{p},
 	}
 	tm.topics[name] = topic
 	return topic
@@ -183,4 +277,17 @@ func (tm *TopicManager) AllTopics() []*Topic {
 		topics = append(topics, t)
 	}
 	return topics
+}
+
+// Close closes all topics.
+func (tm *TopicManager) Close() error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	for _, t := range tm.topics {
+		if err := t.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }

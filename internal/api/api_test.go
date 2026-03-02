@@ -7,16 +7,20 @@ import (
 	"github.com/andy/mikago/internal/protocol"
 )
 
-func newTestBroker() *broker.Broker {
-	return broker.NewBroker(broker.Config{
+func newTestBroker(t *testing.T) *broker.Broker {
+	t.Helper()
+	b := broker.NewBroker(broker.Config{
 		BrokerID: 0,
 		Host:     "localhost",
 		Port:     9092,
+		DataDir:  t.TempDir(),
 	})
+	t.Cleanup(func() { b.Close() })
+	return b
 }
 
 func TestApiVersions(t *testing.T) {
-	b := newTestBroker()
+	b := newTestBroker(t)
 
 	// Build a ApiVersions v0 request body (empty)
 	header := &protocol.RequestHeader{
@@ -61,7 +65,7 @@ func TestApiVersions(t *testing.T) {
 }
 
 func TestMetadata(t *testing.T) {
-	b := newTestBroker()
+	b := newTestBroker(t)
 
 	// Build Metadata v0 request: 1 topic named "test-topic"
 	reqEnc := protocol.NewEncoder()
@@ -126,7 +130,7 @@ func TestMetadata(t *testing.T) {
 }
 
 func TestProduceThenFetch(t *testing.T) {
-	b := newTestBroker()
+	b := newTestBroker(t)
 
 	// First, produce a message using MessageSet v0 format
 	// Build the inner message
