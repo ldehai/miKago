@@ -5,10 +5,14 @@ import (
 	"github.com/andy/mikago/internal/protocol"
 )
 
-// HandleMetadata handles Metadata requests (api_key=3, v0).
+// HandleMetadata handles Metadata requests (api_key=3, v0-v1).
 //
-// Metadata v0 Request: [topics: topic_name]  (null array = all topics)
-// Metadata v0 Response: [brokers: node_id, host, port], [topics: error_code, topic_name, [partitions: error_code, partition_id, leader, replicas, isr]]
+// Metadata v0 Request: [topics: topic_name]
+// Metadata v0 Response: [brokers: node_id, host, port], [topics: error_code, topic_name, [partitions: ...]]
+//
+// Metadata v1 adds:
+//   - Request: same as v0 (null array = all topics)
+//   - Response: brokers get "rack" field, topics get "is_internal" field, adds "controller_id"
 func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) ([]byte, error) {
 	// Parse request: array of topic names
 	topicCount, err := body.ArrayLength()
@@ -16,9 +20,8 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 		return nil, err
 	}
 
-	// Collect requested topic names (nil = all topics)
 	var requestedTopics []string
-	allTopics := topicCount < 0 // null array means all topics
+	allTopics := topicCount < 0
 
 	if !allTopics {
 		requestedTopics = make([]string, 0, topicCount)
@@ -32,15 +35,21 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 	}
 
 	enc := protocol.NewEncoder()
-
-	// Response header
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
-	// Brokers array (single broker)
+	// Brokers array
 	enc.PutArrayLength(1)
-	enc.PutInt32(b.Config.BrokerID) // node_id
-	enc.PutString(b.Config.Host)    // host
-	enc.PutInt32(b.Config.Port)     // port
+	enc.PutInt32(b.Config.BrokerID)
+	enc.PutString(b.Config.Host)
+	enc.PutInt32(b.Config.Port)
+	if header.APIVersion >= 1 {
+		enc.PutString("") // rack (empty string, not null)
+	}
+
+	// v1: controller_id
+	if header.APIVersion >= 1 {
+		enc.PutInt32(b.Config.BrokerID) // we are the controller
+	}
 
 	// Determine which topics to return
 	var topics []*broker.Topic
@@ -58,17 +67,22 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 	enc.PutArrayLength(len(topics))
 	for _, t := range topics {
 		enc.PutInt16(protocol.ErrNone) // topic error code
-		enc.PutString(t.Name)          // topic name
+		enc.PutString(t.Name)
+
+		// v1: is_internal
+		if header.APIVersion >= 1 {
+			enc.PutBool(false) // not internal
+		}
 
 		// Partitions array
 		enc.PutArrayLength(len(t.Partitions))
 		for _, p := range t.Partitions {
-			enc.PutInt16(protocol.ErrNone)  // partition error code
-			enc.PutInt32(p.ID())            // partition index
-			enc.PutInt32(b.Config.BrokerID) // leader (us)
-			enc.PutArrayLength(1)           // replicas (just us)
+			enc.PutInt16(protocol.ErrNone)
+			enc.PutInt32(p.ID())
+			enc.PutInt32(b.Config.BrokerID) // leader
+			enc.PutArrayLength(1)           // replicas
 			enc.PutInt32(b.Config.BrokerID)
-			enc.PutArrayLength(1) // ISR (just us)
+			enc.PutArrayLength(1) // ISR
 			enc.PutInt32(b.Config.BrokerID)
 		}
 	}

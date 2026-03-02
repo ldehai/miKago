@@ -1,41 +1,33 @@
 package api
 
 import (
+	"time"
+
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/protocol"
 )
 
-// HandleProduce handles Produce requests (api_key=0, v0).
+// HandleProduce handles Produce requests (api_key=0, v0-v2).
 //
-// Produce v0 Request:
+// v0/v1/v2 Request format is the same:
 //
-//	acks (INT16)
-//	timeout_ms (INT32)
-//	[topic_data:
-//	  topic_name (STRING)
-//	  [partition_data:
-//	    partition (INT32)
-//	    record_set (BYTES)  -- MessageSet v0 format
-//	  ]
-//	]
+//	acks (INT16), timeout_ms (INT32),
+//	[topic_data: topic_name, [partition_data: partition, record_set (BYTES)]]
 //
-// Produce v0 Response:
+// v0 Response: [responses: topic, [partitions: partition, error_code, base_offset]]
+// v2 Response: [responses: topic, [partitions: partition, error_code, base_offset, log_append_time]] + throttle_time_ms
 //
-//	[responses:
-//	  topic_name (STRING)
-//	  [partition_responses:
-//	    partition (INT32)
-//	    error_code (INT16)
-//	    base_offset (INT64)
-//	  ]
-//	]
+// Messages inside record_set use MessageSet format:
+//
+//	v0 (magic=0): offset, size, crc, magic, attributes, key, value
+//	v1 (magic=1): offset, size, crc, magic, attributes, timestamp, key, value
 func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) ([]byte, error) {
 	// Parse request
 	acks, err := body.Int16()
 	if err != nil {
 		return nil, err
 	}
-	_ = acks // We always acknowledge for now
+	_ = acks
 
 	_, err = body.Int32() // timeout_ms
 	if err != nil {
@@ -51,6 +43,7 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 		partition  int32
 		errCode    int16
 		baseOffset int64
+		appendTime int64
 	}
 	type topicResult struct {
 		name       string
@@ -79,26 +72,23 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 				return nil, err
 			}
 
-			// Read the record set (MessageSet as raw bytes)
 			recordSet, err := body.Bytes()
 			if err != nil {
 				return nil, err
 			}
 
-			// Check partition exists
 			if int(partitionID) >= len(topic.Partitions) || partitionID < 0 {
 				pResults = append(pResults, partitionResult{
 					partition:  partitionID,
 					errCode:    protocol.ErrUnknownTopicOrPartition,
 					baseOffset: -1,
+					appendTime: -1,
 				})
 				continue
 			}
 
 			partition := topic.Partitions[partitionID]
-
-			// Parse the MessageSet v0 format and extract messages
-			messages := parseMessageSetV0(recordSet)
+			messages := parseMessageSet(recordSet)
 			var baseOffset int64 = -1
 			for idx, msg := range messages {
 				off := partition.Append(msg.key, msg.value)
@@ -108,7 +98,6 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 			}
 
 			if len(messages) == 0 {
-				// No valid messages, just store the raw bytes as a single message
 				baseOffset = partition.Append(nil, recordSet)
 			}
 
@@ -116,6 +105,7 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 				partition:  partitionID,
 				errCode:    protocol.ErrNone,
 				baseOffset: baseOffset,
+				appendTime: time.Now().UnixMilli(),
 			})
 		}
 
@@ -137,7 +127,16 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 			enc.PutInt32(pr.partition)
 			enc.PutInt16(pr.errCode)
 			enc.PutInt64(pr.baseOffset)
+			// v2+: log_append_time (INT64)
+			if header.APIVersion >= 2 {
+				enc.PutInt64(pr.appendTime)
+			}
 		}
+	}
+
+	// v2+: throttle_time_ms
+	if header.APIVersion >= 2 {
+		enc.PutInt32(0)
 	}
 
 	return enc.Bytes(), nil
@@ -149,19 +148,11 @@ type rawMessage struct {
 	value []byte
 }
 
-// parseMessageSetV0 parses the Kafka MessageSet v0 binary format.
+// parseMessageSet parses Kafka MessageSet binary format (magic 0 and 1).
 //
-// MessageSet v0:
-//
-//	offset (INT64)
-//	message_size (INT32)
-//	Message:
-//	  crc (INT32)
-//	  magic (INT8) = 0
-//	  attributes (INT8)
-//	  key (BYTES)
-//	  value (BYTES)
-func parseMessageSetV0(data []byte) []rawMessage {
+// magic=0: offset(8), message_size(4), crc(4), magic(1), attributes(1), key(BYTES), value(BYTES)
+// magic=1: offset(8), message_size(4), crc(4), magic(1), attributes(1), timestamp(8), key(BYTES), value(BYTES)
+func parseMessageSet(data []byte) []rawMessage {
 	if len(data) == 0 {
 		return nil
 	}
@@ -169,8 +160,8 @@ func parseMessageSetV0(data []byte) []rawMessage {
 	d := protocol.NewDecoder(data)
 	var messages []rawMessage
 
-	for d.Remaining() >= 12 { // minimum: 8 (offset) + 4 (message_size)
-		_, err := d.Int64() // offset (client-set, we ignore)
+	for d.Remaining() >= 12 {
+		_, err := d.Int64() // offset
 		if err != nil {
 			break
 		}
@@ -184,31 +175,34 @@ func parseMessageSetV0(data []byte) []rawMessage {
 			break
 		}
 
-		// CRC (4 bytes) - we skip validation for MVP
-		_, err = d.Int32()
+		_, err = d.Int32() // CRC
 		if err != nil {
 			break
 		}
 
-		// Magic byte
-		_, err = d.Int8()
+		magic, err := d.Int8() // magic byte
 		if err != nil {
 			break
 		}
 
-		// Attributes
-		_, err = d.Int8()
+		_, err = d.Int8() // attributes
 		if err != nil {
 			break
 		}
 
-		// Key
+		// magic=1 has a timestamp field
+		if magic >= 1 {
+			_, err = d.Int64() // timestamp
+			if err != nil {
+				break
+			}
+		}
+
 		key, err := d.Bytes()
 		if err != nil {
 			break
 		}
 
-		// Value
 		value, err := d.Bytes()
 		if err != nil {
 			break

@@ -261,11 +261,13 @@ func TestProduceThenFetch(t *testing.T) {
 	_, _ = msgD.Int32()
 	// Magic
 	magic, _ := msgD.Int8()
-	if magic != 0 {
-		t.Fatalf("expected magic=0, got %d", magic)
+	if magic != 1 {
+		t.Fatalf("expected magic=1, got %d", magic)
 	}
 	// Attributes
 	_, _ = msgD.Int8()
+	// Timestamp (v1)
+	_, _ = msgD.Int64()
 	// Key (should be null)
 	keyBytes, _ := msgD.Bytes()
 	if keyBytes != nil {

@@ -44,6 +44,9 @@ func (h *Handler) HandleRequest(data []byte) ([]byte, error) {
 	case protocol.APIKeyFetch:
 		return HandleFetch(header, decoder, h.Broker)
 
+	case protocol.APIKeyListOffsets:
+		return HandleListOffsets(header, decoder, h.Broker)
+
 	default:
 		log.Printf("[miKago] Unsupported API key: %d", header.APIKey)
 		return h.unsupportedAPIResponse(header), nil

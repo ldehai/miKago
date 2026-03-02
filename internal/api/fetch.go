@@ -2,40 +2,20 @@ package api
 
 import (
 	"hash/crc32"
+	"time"
 
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/protocol"
 )
 
-// HandleFetch handles Fetch requests (api_key=1, v0).
+// HandleFetch handles Fetch requests (api_key=1, v0-v2).
 //
-// Fetch v0 Request:
+// v0 Request: replica_id, max_wait_ms, min_bytes, [topics: topic, [partitions: partition, offset, max_bytes]]
+// v2 Request: same as v0 (no extra fields)
 //
-//	replica_id (INT32)     -- -1 for consumers
-//	max_wait_ms (INT32)
-//	min_bytes (INT32)
-//	[topics:
-//	  topic_name (STRING)
-//	  [partitions:
-//	    partition (INT32)
-//	    fetch_offset (INT64)
-//	    max_bytes (INT32)
-//	  ]
-//	]
-//
-// Fetch v0 Response:
-//
-//	[responses:
-//	  topic_name (STRING)
-//	  [partition_responses:
-//	    partition (INT32)
-//	    error_code (INT16)
-//	    high_watermark (INT64)
-//	    record_set (BYTES)  -- MessageSet v0 format
-//	  ]
-//	]
+// v0 Response: [responses: topic, [partition_responses: partition, error, hwm, record_set]]
+// v2 Response: throttle_time_ms + same as v0
 func HandleFetch(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) ([]byte, error) {
-	// Parse request
 	_, err := body.Int32() // replica_id
 	if err != nil {
 		return nil, err
@@ -108,6 +88,11 @@ func HandleFetch(header *protocol.RequestHeader, body *protocol.Decoder, b *brok
 	enc := protocol.NewEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
+	// v2+: throttle_time_ms at the beginning
+	if header.APIVersion >= 2 {
+		enc.PutInt32(0) // throttle_time_ms
+	}
+
 	enc.PutArrayLength(len(requests))
 	for _, tf := range requests {
 		enc.PutString(tf.name)
@@ -120,8 +105,8 @@ func HandleFetch(header *protocol.RequestHeader, body *protocol.Decoder, b *brok
 
 			if topic == nil || int(pf.partition) >= len(topic.Partitions) || pf.partition < 0 {
 				enc.PutInt16(protocol.ErrUnknownTopicOrPartition)
-				enc.PutInt64(0)   // high watermark
-				enc.PutBytes(nil) // empty record set
+				enc.PutInt64(0)
+				enc.PutBytes(nil)
 				continue
 			}
 
@@ -131,8 +116,8 @@ func HandleFetch(header *protocol.RequestHeader, body *protocol.Decoder, b *brok
 			enc.PutInt16(protocol.ErrNone)
 			enc.PutInt64(hwm)
 
-			// Encode messages as MessageSet v0
-			messageSetBytes := encodeMessageSetV0(messages)
+			// Encode messages as MessageSet v1 (magic=1, with timestamp)
+			messageSetBytes := encodeMessageSetV1(messages)
 			enc.PutBytes(messageSetBytes)
 		}
 	}
@@ -140,19 +125,20 @@ func HandleFetch(header *protocol.RequestHeader, body *protocol.Decoder, b *brok
 	return enc.Bytes(), nil
 }
 
-// encodeMessageSetV0 encodes messages in Kafka MessageSet v0 format.
+// encodeMessageSetV1 encodes messages in Kafka MessageSet v1 format (magic=1).
 //
-// MessageSet v0:
+// MessageSet v1:
 //
 //	offset (INT64)
 //	message_size (INT32)
 //	Message:
 //	  crc (INT32)
-//	  magic (INT8) = 0
+//	  magic (INT8) = 1
 //	  attributes (INT8) = 0
+//	  timestamp (INT64)
 //	  key (BYTES)
 //	  value (BYTES)
-func encodeMessageSetV0(messages []broker.Message) []byte {
+func encodeMessageSetV1(messages []broker.Message) []byte {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -160,10 +146,12 @@ func encodeMessageSetV0(messages []broker.Message) []byte {
 	enc := protocol.NewEncoder()
 
 	for _, msg := range messages {
-		// Build the inner message first to compute CRC
 		inner := protocol.NewEncoder()
-		inner.PutInt8(0) // magic
+		inner.PutInt8(1) // magic = 1 (v1, has timestamp)
 		inner.PutInt8(0) // attributes
+
+		// Timestamp (milliseconds since epoch)
+		inner.PutInt64(msg.Timestamp.UnixMilli())
 
 		// Key
 		if msg.Key == nil {
@@ -184,18 +172,16 @@ func encodeMessageSetV0(messages []broker.Message) []byte {
 		innerBytes := inner.Bytes()
 		crc := crc32.ChecksumIEEE(innerBytes)
 
-		// Offset
 		enc.PutInt64(msg.Offset)
-
-		// Message size (4 bytes CRC + inner message)
 		enc.PutInt32(int32(4 + len(innerBytes)))
-
-		// CRC
 		enc.PutInt32(int32(crc))
-
-		// Inner message bytes
 		enc.PutRawBytes(innerBytes)
 	}
 
 	return enc.Bytes()
+}
+
+// timestamp returns milliseconds since epoch, used by Kafka protocol
+func timestamp(t time.Time) int64 {
+	return t.UnixNano() / int64(time.Millisecond)
 }
