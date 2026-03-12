@@ -124,19 +124,21 @@ func (t *Topic) Close() error {
 
 // TopicManager manages all topics and their partitions.
 type TopicManager struct {
-	mu              sync.RWMutex
-	topics          map[string]*Topic
-	dataDir         string
-	logSegmentBytes int64
-	retentionMs     int64
+	mu                   sync.RWMutex
+	topics               map[string]*Topic
+	dataDir              string
+	logSegmentBytes      int64
+	retentionMs          int64
+	defaultNumPartitions int
 }
 
-func NewTopicManager(dataDir string, logSegmentBytes int64, retentionMs int64) *TopicManager {
+func NewTopicManager(dataDir string, logSegmentBytes int64, retentionMs int64, defaultNumPartitions int) *TopicManager {
 	tm := &TopicManager{
-		topics:          make(map[string]*Topic),
-		dataDir:         dataDir,
-		logSegmentBytes: logSegmentBytes,
-		retentionMs:     retentionMs,
+		topics:               make(map[string]*Topic),
+		dataDir:              dataDir,
+		logSegmentBytes:      logSegmentBytes,
+		retentionMs:          retentionMs,
+		defaultNumPartitions: defaultNumPartitions,
 	}
 	tm.recoverFromDisk()
 	return tm
@@ -239,7 +241,7 @@ func (tm *TopicManager) CreateTopic(name string, numPartitions int) (*Topic, err
 	return topic, nil
 }
 
-// GetOrCreateTopic gets an existing topic or creates one with 1 partition.
+// GetOrCreateTopic gets an existing topic or creates one with defaultNumPartitions.
 func (tm *TopicManager) GetOrCreateTopic(name string) *Topic {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -249,14 +251,23 @@ func (tm *TopicManager) GetOrCreateTopic(name string) *Topic {
 	}
 
 	topicDir := tm.topicDir(name)
-	p, err := NewPartition(0, topicDir, tm.logSegmentBytes, tm.retentionMs)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create partition for topic %q: %v", name, err))
+	numPartitions := tm.defaultNumPartitions
+	if numPartitions <= 0 {
+		numPartitions = 1
+	}
+
+	partitions := make([]*Partition, numPartitions)
+	for i := 0; i < numPartitions; i++ {
+		p, err := NewPartition(int32(i), topicDir, tm.logSegmentBytes, tm.retentionMs)
+		if err != nil {
+			panic(fmt.Sprintf("failed to create partition %d for topic %q: %v", i, name, err))
+		}
+		partitions[i] = p
 	}
 
 	topic := &Topic{
 		Name:       name,
-		Partitions: []*Partition{p},
+		Partitions: partitions,
 	}
 	tm.topics[name] = topic
 	return topic

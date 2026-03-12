@@ -56,10 +56,14 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 	if allTopics {
 		topics = b.TopicManager.AllTopics()
 	} else {
+		// If we are asked about a topic that doesn't exist, create it auto-magically
 		topics = make([]*broker.Topic, 0, len(requestedTopics))
-		for _, name := range requestedTopics {
-			t := b.TopicManager.GetOrCreateTopic(name)
-			topics = append(topics, t)
+		for _, topicName := range requestedTopics {
+			topic := b.TopicManager.GetTopic(topicName)
+			if topic == nil {
+				topic = b.TopicManager.GetOrCreateTopic(topicName)
+			}
+			topics = append(topics, topic)
 		}
 	}
 

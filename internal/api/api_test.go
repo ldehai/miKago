@@ -285,3 +285,216 @@ func TestProduceThenFetch(t *testing.T) {
 
 	t.Log("✅ Produce → Fetch round-trip successful!")
 }
+
+func TestConsumerGroupAPIs(t *testing.T) {
+	b := newTestBroker(t)
+
+	// 1. Create a Topic manually for test
+	_, err := b.TopicManager.CreateTopic("group-topic", 1)
+	if err != nil {
+		t.Fatalf("failed to create topic: %v", err)
+	}
+
+	groupID := "test-cg"
+	topicName := "group-topic"
+	var partition int32 = 0
+	var commitOffset int64 = 42
+
+	// --- Test OffsetCommit ---
+	commitEnc := protocol.NewEncoder()
+	commitEnc.PutString(groupID)
+	commitEnc.PutArrayLength(1) // 1 topic
+	commitEnc.PutString(topicName)
+	commitEnc.PutArrayLength(1) // 1 partition
+	commitEnc.PutInt32(partition)
+	commitEnc.PutInt64(commitOffset)
+	commitEnc.PutString("some-metadata")
+
+	commitHeader := &protocol.RequestHeader{
+		APIKey:        protocol.APIKeyOffsetCommit,
+		APIVersion:    0,
+		CorrelationID: 101,
+	}
+
+	commitResp, err := HandleOffsetCommit(commitHeader, protocol.NewDecoder(commitEnc.Bytes()), b)
+	if err != nil {
+		t.Fatalf("HandleOffsetCommit error: %v", err)
+	}
+
+	d := protocol.NewDecoder(commitResp)
+	corrID, _ := d.Int32()
+	if corrID != 101 {
+		t.Fatalf("expected correlation_id=101, got %d", corrID)
+	}
+	topicCount, _ := d.ArrayLength()
+	if topicCount != 1 {
+		t.Fatalf("expected 1 topic response, got %d", topicCount)
+	}
+	tName, _ := d.String()
+	if tName != topicName {
+		t.Fatalf("expected topic %q, got %q", topicName, tName)
+	}
+	partCount, _ := d.ArrayLength()
+	if partCount != 1 {
+		t.Fatalf("expected 1 partition response, got %d", partCount)
+	}
+	pID, _ := d.Int32()
+	errCode, _ := d.Int16()
+	if pID != partition || errCode != protocol.ErrNone {
+		t.Fatalf("expected partition=%d errCode=0, got %d, %d", partition, pID, errCode)
+	}
+
+	// --- Test OffsetFetch ---
+	fetchEnc := protocol.NewEncoder()
+	fetchEnc.PutString(groupID)
+	fetchEnc.PutArrayLength(1) // 1 topic
+	fetchEnc.PutString(topicName)
+	fetchEnc.PutArrayLength(1) // 1 partition
+	fetchEnc.PutInt32(partition)
+
+	fetchHeader := &protocol.RequestHeader{
+		APIKey:        protocol.APIKeyOffsetFetch,
+		APIVersion:    1,
+		CorrelationID: 102,
+	}
+
+	fetchResp, err := HandleOffsetFetch(fetchHeader, protocol.NewDecoder(fetchEnc.Bytes()), b)
+	if err != nil {
+		t.Fatalf("HandleOffsetFetch error: %v", err)
+	}
+
+	d = protocol.NewDecoder(fetchResp)
+	corrID, _ = d.Int32()
+	if corrID != 102 {
+		t.Fatalf("expected correlation_id=102, got %d", corrID)
+	}
+	topicCount, _ = d.ArrayLength()
+	if topicCount != 1 {
+		t.Fatalf("expected 1 topic response, got %d", topicCount)
+	}
+	tName, _ = d.String()
+	if tName != topicName {
+		t.Fatalf("expected topic %q, got %q", topicName, tName)
+	}
+	partCount, _ = d.ArrayLength()
+	if partCount != 1 {
+		t.Fatalf("expected 1 partition response, got %d", partCount)
+	}
+	pID, _ = d.Int32()
+	fetchedOffset, _ := d.Int64()
+	_, _ = d.String() // metadata
+	errCode, _ = d.Int16()
+
+	if pID != partition || errCode != protocol.ErrNone || fetchedOffset != commitOffset {
+		t.Fatalf("expected partition=%d errCode=0 offset=%d, got p=%d err=%d off=%d",
+			partition, commitOffset, pID, errCode, fetchedOffset)
+	}
+
+	t.Log("✅ OffsetCommit -> OffsetFetch round-trip successful!")
+
+	// --- Test FindCoordinator ---
+	fcEnc := protocol.NewEncoder()
+	fcEnc.PutString(groupID)
+
+	fcHeader := &protocol.RequestHeader{
+		APIKey:        protocol.APIKeyFindCoordinator,
+		APIVersion:    0,
+		CorrelationID: 103,
+	}
+
+	fcResp, err := HandleFindCoordinator(fcHeader, protocol.NewDecoder(fcEnc.Bytes()), b)
+	if err != nil {
+		t.Fatalf("HandleFindCoordinator error: %v", err)
+	}
+
+	d = protocol.NewDecoder(fcResp)
+	corrID, _ = d.Int32()
+	if corrID != 103 {
+		t.Fatalf("expected correlation_id=103, got %d", corrID)
+	}
+	errCode, _ = d.Int16()
+	if errCode != protocol.ErrNone {
+		t.Fatalf("expected ErrNone, got %d", errCode)
+	}
+	nodeID, _ := d.Int32()
+	host, _ := d.String()
+	port, _ := d.Int32()
+
+	if nodeID != b.Config.BrokerID || host != b.Config.Host || port != b.Config.Port {
+		t.Fatalf("expected broker %d %s:%d, got %d %s:%d",
+			b.Config.BrokerID, b.Config.Host, b.Config.Port, nodeID, host, port)
+	}
+
+	t.Log("✅ FindCoordinator successful!")
+}
+
+func TestCreateTopicsAPI(t *testing.T) {
+	b := newTestBroker(t)
+
+	// Create request
+	enc := protocol.NewEncoder()
+	enc.PutArrayLength(2)
+
+	// Topic 1: 3 partitions
+	enc.PutString("multi-part-topic")
+	enc.PutInt32(3)
+	enc.PutInt16(1)       // replication factor
+	enc.PutArrayLength(0) // assignments
+	enc.PutArrayLength(0) // configs
+
+	// Topic 2: invalid partitions
+	enc.PutString("invalid-topic")
+	enc.PutInt32(0)
+	enc.PutInt16(1)
+	enc.PutArrayLength(0) // assignments
+	enc.PutArrayLength(0) // configs
+
+	enc.PutInt32(5000) // timeout ms
+
+	header := &protocol.RequestHeader{
+		APIKey:        protocol.APIKeyCreateTopics,
+		APIVersion:    0,
+		CorrelationID: 200,
+	}
+
+	respBytes, err := HandleCreateTopics(header, protocol.NewDecoder(enc.Bytes()), b)
+	if err != nil {
+		t.Fatalf("HandleCreateTopics error: %v", err)
+	}
+
+	d := protocol.NewDecoder(respBytes)
+	corrID, _ := d.Int32()
+	if corrID != 200 {
+		t.Fatalf("expected correlation_id=200, got %d", corrID)
+	}
+
+	topicCount, _ := d.ArrayLength()
+	if topicCount != 2 {
+		t.Fatalf("expected 2 topic responses, got %d", topicCount)
+	}
+
+	// Topic 1 response
+	name1, _ := d.String()
+	err1, _ := d.Int16()
+	if name1 != "multi-part-topic" || err1 != protocol.ErrNone {
+		t.Fatalf("expected multi-part-topic success, got name=%s err=%d", name1, err1)
+	}
+
+	// Topic 2 response
+	name2, _ := d.String()
+	err2, _ := d.Int16()
+	if name2 != "invalid-topic" || err2 != protocol.ErrInvalidPartitions {
+		t.Fatalf("expected invalid-topic ErrInvalidPartitions, got name=%s err=%d", name2, err2)
+	}
+
+	// Verify topic actually created
+	topic := b.TopicManager.GetTopic("multi-part-topic")
+	if topic == nil {
+		t.Fatalf("topic not found in manager")
+	}
+	if len(topic.Partitions) != 3 {
+		t.Fatalf("expected 3 partitions, got %d", len(topic.Partitions))
+	}
+
+	t.Log("✅ CreateTopics API successful!")
+}

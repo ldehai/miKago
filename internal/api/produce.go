@@ -63,7 +63,10 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 			return nil, err
 		}
 
-		topic := b.TopicManager.GetOrCreateTopic(topicName)
+		topic := b.TopicManager.GetTopic(topicName)
+		if topic == nil {
+			topic = b.TopicManager.GetOrCreateTopic(topicName)
+		}
 		pResults := make([]partitionResult, 0, partCount)
 
 		for j := 0; j < partCount; j++ {

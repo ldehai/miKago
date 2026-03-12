@@ -12,7 +12,7 @@
 - ✅ In-memory topic/partition storage
 - ✅ Auto topic creation on first access
 - ✅ Graceful shutdown with signal handling
-
+s's
 ## Quick Start
 
 ```bash
@@ -60,8 +60,8 @@ go test ./... -v
 
 ## Roadmap
 
-- [ ] **Phase 2**: Disk persistence (segment files + index)
-- [ ] **Phase 3**: Multiple partitions & consumer groups
+- [x] **Phase 2**: Disk persistence (segment files + index)
+- [x] **Phase 3**: Multiple partitions & consumer groups
 - [ ] **Phase 4**: Multi-broker replication
 
 ## License

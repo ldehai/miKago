@@ -2,11 +2,15 @@ package protocol
 
 // API Keys
 const (
-	APIKeyProduce     int16 = 0
-	APIKeyFetch       int16 = 1
-	APIKeyListOffsets int16 = 2
-	APIKeyMetadata    int16 = 3
-	APIKeyApiVersions int16 = 18
+	APIKeyProduce         int16 = 0
+	APIKeyFetch           int16 = 1
+	APIKeyListOffsets     int16 = 2
+	APIKeyMetadata        int16 = 3
+	APIKeyOffsetCommit    int16 = 8
+	APIKeyOffsetFetch     int16 = 9
+	APIKeyFindCoordinator int16 = 10
+	APIKeyApiVersions     int16 = 18
+	APIKeyCreateTopics    int16 = 19
 )
 
 // Error Codes
@@ -43,6 +47,10 @@ var SupportedAPIVersions = []APIVersionRange{
 	{APIKey: APIKeyProduce, MinVersion: 0, MaxVersion: 2},
 	{APIKey: APIKeyFetch, MinVersion: 0, MaxVersion: 2},
 	{APIKey: APIKeyListOffsets, MinVersion: 0, MaxVersion: 1},
+	{APIKey: APIKeyOffsetCommit, MinVersion: 0, MaxVersion: 0},
+	{APIKey: APIKeyOffsetFetch, MinVersion: 0, MaxVersion: 1},
+	{APIKey: APIKeyFindCoordinator, MinVersion: 0, MaxVersion: 0},
 	{APIKey: APIKeyMetadata, MinVersion: 0, MaxVersion: 1},
+	{APIKey: APIKeyCreateTopics, MinVersion: 0, MaxVersion: 1},
 	{APIKey: APIKeyApiVersions, MinVersion: 0, MaxVersion: 1},
 }
