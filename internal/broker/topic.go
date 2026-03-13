@@ -94,6 +94,14 @@ func (p *Partition) Fetch(startOffset int64, maxBytes int32) ([]Message, int64) 
 	return messages, hwm
 }
 
+// FetchZeroCopy retrieves messages using file descriptors for zero-copy transmission.
+func (p *Partition) FetchZeroCopy(startOffset int64, maxBytes int32) (*os.File, int64, int32, int64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.log.FetchZeroCopy(startOffset, maxBytes)
+}
+
 // HighWaterMark returns the next offset to be written.
 func (p *Partition) HighWaterMark() int64 {
 	p.mu.RLock()

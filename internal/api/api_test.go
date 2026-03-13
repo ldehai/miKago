@@ -1,9 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"testing"
 
-	"github.com/andy/mikago/internal/broker"
+	"github.com/andy/mikago/internal/broker"    
 	"github.com/andy/mikago/internal/protocol"
 )
 
@@ -222,10 +223,14 @@ func TestProduceThenFetch(t *testing.T) {
 	}
 
 	fetchBody := protocol.NewDecoder(fetchReq.Bytes())
-	fetchResp, err := HandleFetch(fetchHeader, fetchBody, b)
+	fetchRespPayload, err := HandleFetchZeroCopy(fetchHeader, fetchBody, b)
 	if err != nil {
 		t.Fatalf("fetch error: %v", err)
 	}
+
+	var fetchBuf bytes.Buffer
+	fetchRespPayload.WriteTo(&fetchBuf)
+	fetchResp := fetchBuf.Bytes()
 
 	// Parse fetch response
 	fd := protocol.NewDecoder(fetchResp)

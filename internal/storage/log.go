@@ -252,6 +252,52 @@ func (l *Log) Fetch(startOffset int64, maxBytes int32) ([]*Record, int64) {
 	return allRecords, hwm
 }
 
+// FetchZeroCopy retrieves the file segment and byte range for the given offset, enabling zero-copy network sends.
+// Note: It's the caller's responsibility to close the returned *os.File.
+func (l *Log) FetchZeroCopy(startOffset int64, maxBytes int32) (*os.File, int64, int32, int64) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	hwm := l.activeSegment.NextOffset()
+	if startOffset >= hwm || len(l.segments) == 0 {
+		return nil, 0, 0, hwm
+	}
+
+	segIdx := l.findSegment(startOffset)
+	if segIdx < 0 {
+		return nil, 0, 0, hwm
+	}
+
+	seg := l.segments[segIdx]
+
+	position, err := seg.findPosition(startOffset)
+	if err != nil {
+		return nil, 0, 0, hwm
+	}
+
+	logPath := filepath.Join(seg.dir, segmentFileName(seg.baseOffset, ".log"))
+	f, err := os.Open(logPath)
+	if err != nil {
+		return nil, 0, 0, hwm
+	}
+
+	// Calculate how much we can read
+	fileInfo, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, 0, hwm
+	}
+
+	availableBytes := fileInfo.Size() - position
+	bytesToRead := int32(availableBytes)
+	if bytesToRead > maxBytes {
+		bytesToRead = maxBytes
+		// Note: Kafka clients can handle truncated messages at the end of a fetch chunk.
+	}
+
+	return f, position, bytesToRead, hwm
+}
+
 func (l *Log) findSegment(offset int64) int {
 	n := len(l.segments)
 	if n == 0 {

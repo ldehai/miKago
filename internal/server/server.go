@@ -112,32 +112,40 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		// Handle the request
-		response, err := s.handler.HandleRequest(msgBuf)
+		responsePayload, err := s.handler.HandleRequest(msgBuf)
 		if err != nil {
 			log.Printf("[miKago] Error handling request from %s: %v", remoteAddr, err)
 			// Try to send an error response if we can extract the correlation ID
 			if len(msgBuf) >= 8 {
 				corrID := int32(binary.BigEndian.Uint32(msgBuf[4:8]))
-				response = makeErrorResponse(corrID)
+				responsePayload = makeErrorResponse(corrID)
 			} else {
 				return
 			}
 		}
 
-		// Write the response with size prefix
-		responseMsg := protocol.WriteSizePrefix(response)
-		_, err = conn.Write(responseMsg)
+		// Write the response size prefix first
+		respSizeBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(respSizeBuf, uint32(responsePayload.Size()))
+		_, err = conn.Write(respSizeBuf)
 		if err != nil {
-			log.Printf("[miKago] Error writing response to %s: %v", remoteAddr, err)
+			log.Printf("[miKago] Error writing response size to %s: %v", remoteAddr, err)
+			return
+		}
+
+		// Write the actual payload (potentially zero-copy sendfile)
+		_, err = responsePayload.WriteTo(conn)
+		if err != nil {
+			log.Printf("[miKago] Error writing response payload to %s: %v", remoteAddr, err)
 			return
 		}
 	}
 }
 
 // makeErrorResponse creates a minimal error response.
-func makeErrorResponse(correlationID int32) []byte {
+func makeErrorResponse(correlationID int32) protocol.Payload {
 	enc := protocol.NewEncoder()
 	protocol.EncodeResponseHeader(enc, correlationID)
 	enc.PutInt16(-1) // generic error
-	return enc.Bytes()
+	return protocol.BytesPayload(enc.Bytes())
 }

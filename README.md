@@ -1,3 +1,13 @@
+```text
+            _ _  __                 
+  _ __ ___ (_) |/ /__ _  __ _  ___  
+ | '_ ' _ \| | ' // _' |/ _' |/ _ \ 
+ | | | | | | | . \ (_| | (_| | (_) |
+ |_| |_| |_|_|_|\_\__,_|\__, |\___/ 
+                        |___/       
+   mini Kafka with Go
+```
+
 # 🚀 miKago (mini Kafka with Go)
 
 **miKago** is a lightweight, zero-dependency, distributed message broker written entirely in Go. It speaks the native Apache Kafka binary protocol, meaning you can connect to it using standard Kafka clients, but it compiles down to a single, lightning-fast Go binary.
@@ -12,6 +22,8 @@
     Full support for topics with multiple partitions for parallel throughput. Built-in `GroupManager` handles Consumer Group paradigms, answering `OffsetCommit` and `OffsetFetch` requests so clients can pause and resume workloads without data loss or duplication.
 *   **Native Kafka Protocol Compatibility**
     Speaks the exact size-delimited binary TCP framing format used by Kafka. It decodes intricate Kafka Request Headers, `MessageSet` wrappers, and correlation IDs to guarantee compatibility with official Kafka client libraries.
+*   **Zero-Copy Network I/O (`sendfile`)**
+    To maximize consumer throughput, the `Fetch` API utilizes OS-level `sendfile` zero-copy system calls. Data streams directly from the disk's Page Cache into the network socket buffer, completely bypassing user-space memory copying and reducing CPU overhead to almost zero.
 *   **Zero-Dependency Core**
     Written purely using Go's standard library (`net`, `io`, `sync`, `net/rpc`). No heavy third-party vendor bloat.
 
@@ -102,6 +114,9 @@ miKago/
 - [x] **Phase 2**: Disk persistence (segment `.log` & `.index` files, crash recovery)
 - [x] **Phase 3**: Multiple partitions & consumer groups
 - [x] **Phase 4**: Multi-broker replication (Raft Data Log Replication)
+- [x] **Phase 5**: Zero-Copy Network I/O (using `sendfile` for `Fetch` API to bypass user-space memory)
+- [ ] **Phase 6**: Partition-Level Leadership (Fine-grained leader election per partition for load balancing)
+- [ ] **Phase 7**: Exactly-Once Semantics (EOS) / Idempotent Producers
 
 ## License
 
