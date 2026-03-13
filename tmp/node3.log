@@ -7,15 +7,22 @@
                               |___/      
    mini Kafka with Go — Phase 2 Persistent
 	
-2026/03/13 18:20:17 [miKago] Data directory: tmp/data3
-2026/03/13 18:20:17 [miKago] Limits: max_message=1024KB, max_request=100MB, segment=1024MB
-2026/03/13 18:20:17 [miKago] Retention: 168 hours
-2026/03/13 18:20:17 [Raft 3] Internal RPC listening on :8003
-2026/03/13 18:20:17 [miKago] Starting broker (id=3) on localhost:9093
-2026/03/13 18:20:17 [miKago] 🚀 Broker listening on localhost:9093
-2026/03/13 18:20:17 [Raft 3] Received RequestVote(Term:2, Candidate:2, LastLogIdx:0, LastLogTerm:0)
-2026/03/13 18:20:17 [Raft 3] Term 2: Becoming Follower
-2026/03/13 18:20:17 [Raft 3] Granted vote to 2 for term 2
-2026/03/13 18:20:29 [miKago] Received signal terminated, shutting down...
-2026/03/13 18:20:29 [miKago] Shutting down server...
-2026/03/13 18:20:29 [miKago] Broker stopped.
+2026/03/13 18:31:23 [miKago] Data directory: tmp/data3
+2026/03/13 18:31:23 [miKago] Limits: max_message=1024KB, max_request=100MB, segment=1024MB
+2026/03/13 18:31:23 [miKago] Retention: 168 hours
+2026/03/13 18:31:23 [Raft 3] Internal RPC listening on :8003
+2026/03/13 18:31:23 [miKago] Starting broker (id=3) on localhost:9093
+2026/03/13 18:31:23 [miKago] 🚀 Broker listening on localhost:9093
+2026/03/13 18:31:23 [Raft 3] Term 1: Becoming Follower
+2026/03/13 18:31:29 [Raft 3] Appended 1 entries from leader 1. Last Index: 1
+2026/03/13 18:31:29 [Raft 3] Updating commitIndex to 1
+2026/03/13 18:31:29 [Broker 3] Applying Raft Cmd(Index=1, Topic=distributed-topic, Partition=0, Size=57bytes) to local Disk
+2026/03/13 18:31:30 [Raft 3] Appended 1 entries from leader 1. Last Index: 2
+2026/03/13 18:31:30 [Raft 3] Updating commitIndex to 2
+2026/03/13 18:31:30 [Broker 3] Applying Raft Cmd(Index=2, Topic=distributed-topic, Partition=0, Size=57bytes) to local Disk
+2026/03/13 18:31:32 [Raft 3] Appended 1 entries from leader 1. Last Index: 3
+2026/03/13 18:31:32 [Raft 3] Updating commitIndex to 3
+2026/03/13 18:31:32 [Broker 3] Applying Raft Cmd(Index=3, Topic=distributed-topic, Partition=0, Size=57bytes) to local Disk
+2026/03/13 18:31:36 [miKago] Received signal terminated, shutting down...
+2026/03/13 18:31:36 [miKago] Shutting down server...
+2026/03/13 18:31:36 [miKago] Broker stopped.

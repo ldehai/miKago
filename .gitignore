@@ -12,3 +12,4 @@
 
 # Go
 vendor/
+tmp/

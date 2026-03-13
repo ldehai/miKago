@@ -5,6 +5,7 @@ import (
 
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/protocol"
+	"github.com/andy/mikago/internal/raft"
 )
 
 // HandleProduce handles Produce requests (api_key=0, v0-v2).
@@ -102,17 +103,43 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 			}
 
 			partition := topic.Partitions[partitionID]
-			messages := parseMessageSet(recordSet)
 			var baseOffset int64 = -1
-			for idx, msg := range messages {
-				off := partition.Append(msg.key, msg.value)
-				if idx == 0 {
-					baseOffset = off
-				}
-			}
 
-			if len(messages) == 0 {
-				baseOffset = partition.Append(nil, recordSet)
+			if b.Raft != nil {
+				// Replicate via Raft cluster
+				_, _, isLeader := b.Raft.Propose(raft.ReplicateCmd{
+					Topic:       topicName,
+					PartitionID: partitionID,
+					RecordSet:   recordSet,
+				})
+
+				if !isLeader {
+					pResults = append(pResults, partitionResult{
+						partition:  partitionID,
+						errCode:    protocol.ErrNotLeaderForPartition, // Return error if not leader
+						baseOffset: -1,
+						appendTime: -1,
+					})
+					continue
+				}
+
+				// Basic MVP: Assuming it succeeds in background immediately via Raft Loop 
+				// (In production, we should wait on a channel for actual Raft commit index before responding)
+				// Here we just fetch the next offset artificially
+				baseOffset = partition.NextOffset()
+			} else {
+				// Legacy Standalone Logic
+				messages := parseMessageSet(recordSet)
+				for idx, msg := range messages {
+					off := partition.Append(msg.key, msg.value)
+					if idx == 0 {
+						baseOffset = off
+					}
+				}
+
+				if len(messages) == 0 {
+					baseOffset = partition.Append(nil, recordSet)
+				}
 			}
 
 			pResults = append(pResults, partitionResult{

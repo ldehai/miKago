@@ -73,12 +73,44 @@ func NewBroker(cfg Config) *Broker {
 		}
 	}
 
-	return &Broker{
+	b := &Broker{
 		Config:       cfg,
 		TopicManager: NewTopicManager(cfg.DataDir, cfg.LogSegmentBytes, cfg.RetentionMs, int(cfg.DefaultNumPartitions)),
 		GroupManager: NewGroupManager(),
 		Raft:         rf,
 		RaftServer:   rs,
+	}
+
+	if b.Raft != nil {
+		go b.runStateMachine()
+	}
+
+	return b
+}
+
+// runStateMachine listens for committed log entries from the Raft consensus engine
+// and applies them to the local node's state machine (disk storage, offset maps, etc).
+func (b *Broker) runStateMachine() {
+	for msg := range b.Raft.ApplyCh {
+		if !msg.CommandValid {
+			continue
+		}
+
+		// Decode the command and apply to local storage.
+		// For MVP, we pass around a custom struct: ReplicateCmd
+		cmd, ok := msg.Command.(raft.ReplicateCmd)
+		if !ok {
+			log.Printf("[Broker %d] Unknown command type received from Raft state machine", b.Config.BrokerID)
+			continue
+		}
+
+		log.Printf("[Broker %d] Applying Raft Cmd(Index=%d, Topic=%s, Partition=%d, Size=%dbytes) to local Disk",
+			b.Config.BrokerID, msg.CommandIndex, cmd.Topic, cmd.PartitionID, len(cmd.RecordSet))
+
+		topic := b.TopicManager.GetOrCreateTopic(cmd.Topic)
+		if int(cmd.PartitionID) < len(topic.Partitions) {
+			topic.Partitions[cmd.PartitionID].Append(nil, cmd.RecordSet)
+		}
 	}
 }
 

@@ -1,11 +1,12 @@
 package raft
 
 import (
+	"encoding/gob"
 	"fmt"
 	"log"
 	"net"
-	"net/rpc"
 	"net/http"
+	"net/rpc"
 	"sync"
 )
 
@@ -133,6 +134,7 @@ func (rw *RaftRPCWrapper) AppendEntries(args *AppendEntriesArgs, reply *AppendEn
 			rw.rf.commitIndex = lastNewIndex
 		}
 		log.Printf("[Raft %s] Updating commitIndex to %d", rw.rf.ID, rw.rf.commitIndex)
+		rw.rf.applyCommitted()
 	}
 
 	reply.Success = true
@@ -149,6 +151,9 @@ type NetServer struct {
 
 // StartRaftServer starts the RPC server for this Raft node.
 func StartRaftServer(rf *Raft, port int) (*NetServer, error) {
+	// Register the command type with gob so it can be sent over RPC within interface{}
+	gob.Register(ReplicateCmd{})
+
 	rpcServer := rpc.NewServer()
 	
 	wrapper := &RaftRPCWrapper{rf: rf}

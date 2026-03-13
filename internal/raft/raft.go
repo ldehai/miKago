@@ -59,6 +59,21 @@ type Raft struct {
 	// Timers and channels
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
+	ApplyCh        chan ApplyMsg
+}
+
+// ApplyMsg represents a committed message to be applied to the state machine.
+type ApplyMsg struct {
+	CommandValid bool
+	Command      interface{}
+	CommandIndex int
+}
+
+// ReplicateCmd encapsulates the data we want to replicate via Raft.
+type ReplicateCmd struct {
+	Topic       string
+	PartitionID int32
+	RecordSet   []byte
 }
 
 // NewRaft creates and initializes a new Raft node.
@@ -74,6 +89,7 @@ func NewRaft(id string, peers []Peer) *Raft {
 		lastApplied: 0,
 		nextIndex:   make(map[string]int),
 		matchIndex:  make(map[string]int),
+		ApplyCh:     make(chan ApplyMsg, 100),
 	}
 
 	// Start the election timer (random duration between 150ms and 300ms)
@@ -257,6 +273,7 @@ func (r *Raft) runLeader() {
 								if matchCount > (len(r.Peers)+1)/2 {
 									r.commitIndex = N
 									log.Printf("[Raft %s] Leader updated commitIndex to %d (applied to state machine)", r.ID, r.commitIndex)
+									r.applyCommitted()
 									break
 								}
 							}
@@ -318,4 +335,28 @@ func (r *Raft) getLastLogIndex() int {
 
 func (r *Raft) getLastLogTerm() int {
 	return r.log[len(r.log)-1].Term
+}
+
+// applyCommitted pushes committed entries to the apply channel.
+// Must be called with lock held.
+func (r *Raft) applyCommitted() {
+	if r.commitIndex > r.lastApplied {
+		entriesToApply := append([]LogEntry{}, r.log[r.lastApplied+1:r.commitIndex+1]...)
+		
+		go func(entries []LogEntry) {
+			for _, entry := range entries {
+				r.ApplyCh <- ApplyMsg{
+					CommandValid: true,
+					Command:      entry.Command,
+					CommandIndex: entry.Index,
+				}
+				
+				r.mu.Lock()
+				if r.lastApplied < entry.Index {
+					r.lastApplied = entry.Index
+				}
+				r.mu.Unlock()
+			}
+		}(entriesToApply)
+	}
 }

@@ -101,6 +101,11 @@ func (p *Partition) HighWaterMark() int64 {
 	return p.log.HighWaterMark()
 }
 
+// NextOffset is an alias for HighWaterMark returning the theoretical next sequence number.
+func (p *Partition) NextOffset() int64 {
+	return p.HighWaterMark()
+}
+
 // Close flushes and closes the partition's log.
 func (p *Partition) Close() error {
 	return p.log.Close()

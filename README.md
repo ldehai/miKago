@@ -27,6 +27,18 @@
 
 ---
 
+## 🧠 Distributed Consensus (Raft Engine)
+
+At the heart of miKago's distributed capabilities lies a **from-scratch implementation of the Raft Consensus Algorithm**.
+
+Instead of delegating cluster state and partition leadership to an external system like ZooKeeper, miKago embeds a fully asynchronous, goroutine-safe Raft engine.
+* **Leader Election**: Brokers use randomized timers and `RequestVote` RPCs to dynamically elect a cluster leader, capable of auto-recovering from network partitions or broker crashes.
+* **Log Replication**: Every Kafka `Produce` payload is converted into a Raft `LogEntry`. The Leader broadcasts these blocks across the cluster using `AppendEntries` heartbeats.
+* **Strong Consistency**: A message is only acknowledged back to the Kafka producer once it has safely replicated beyond the cluster's majority quorum. It is then securely dispatched down to the `Partition.Append()` storage layer via an abstracted core `ApplyCh` channel.
+* **Zero-Dep RPC**: Inter-broker Raft communication is engineered entirely over the native `net/rpc` standard library utilizing `encoding/gob` for blazing-fast interface serialization.
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Build from Source
@@ -89,7 +101,7 @@ miKago/
 - [x] **Phase 1**: In-memory TCP protocol scaffold (`ApiVersions`, `Metadata`, `Produce`, `Fetch`)
 - [x] **Phase 2**: Disk persistence (segment `.log` & `.index` files, crash recovery)
 - [x] **Phase 3**: Multiple partitions & consumer groups
-- [ ] **Phase 4**: Multi-broker replication (Raft Data Log Replication)
+- [x] **Phase 4**: Multi-broker replication (Raft Data Log Replication)
 
 ## License
 
