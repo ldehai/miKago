@@ -2,7 +2,7 @@
 
 **mini Kafka with Go** — A Kafka-compatible message broker MVP written in Go.
 
-## Features (Phase 1)
+## Features
 
 - ✅ Kafka binary protocol over TCP
 - ✅ `ApiVersions` API (handshake & version negotiation)
