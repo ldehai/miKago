@@ -12,7 +12,8 @@
 - ✅ In-memory topic/partition storage
 - ✅ Auto topic creation on first access
 - ✅ Graceful shutdown with signal handling
-s's
+- ✅ **[Phase 4]** Raft Consensus Engine for Multi-Broker Clustering
+
 ## Quick Start
 
 ```bash
@@ -22,8 +23,10 @@ make build
 # Run (default: localhost:9092)
 make run
 
-# Or with custom options
-./mikago -host 0.0.0.0 -port 9092 -broker-id 0
+# Run a Raft Distributed Cluster (3 nodes)
+./mikago -broker-id 1 -port 9091 -data-dir ./data1 -raft-port 8001 -peers "2@localhost:8002,3@localhost:8003"
+./mikago -broker-id 2 -port 9092 -data-dir ./data2 -raft-port 8002 -peers "1@localhost:8001,3@localhost:8003"
+./mikago -broker-id 3 -port 9093 -data-dir ./data3 -raft-port 8003 -peers "1@localhost:8001,2@localhost:8002"
 ```
 
 ## Architecture
@@ -34,7 +37,9 @@ miKago/
 ├── internal/
 │   ├── protocol/       # Binary encoder/decoder, headers, API keys
 │   ├── api/            # API handlers (ApiVersions, Metadata, Produce, Fetch)
+│   ├── raft/           # Raft consensus engine (Leader election, Log replication)
 │   ├── broker/         # Broker config, topic/partition management
+│   ├── storage/        # Disk persistence (segments, indexes)
 │   └── server/         # TCP server with Kafka framing
 └── tests/              # Integration tests
 ```

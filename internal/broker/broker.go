@@ -1,5 +1,12 @@
 package broker
 
+import (
+	"fmt"
+	"log"
+
+	"github.com/andy/mikago/internal/raft"
+)
+
 // Default configuration values matching Kafka defaults.
 const (
 	DefaultMaxMessageBytes int32 = 1 * 1024 * 1024         // 1MB - message.max.bytes
@@ -20,6 +27,8 @@ type Config struct {
 	LogSegmentBytes      int64
 	RetentionMs          int64 // log.retention.ms, -1 = keep forever
 	DefaultNumPartitions int32 // default number of partitions for auto-created topics
+	RaftPort             int32
+	RaftPeers            []raft.Peer
 }
 
 // Broker is the main broker instance.
@@ -27,6 +36,8 @@ type Broker struct {
 	Config       Config
 	TopicManager *TopicManager
 	GroupManager *GroupManager
+	Raft         *raft.Raft
+	RaftServer   *raft.NetServer
 }
 
 // NewBroker creates a new Broker with the given configuration.
@@ -49,14 +60,32 @@ func NewBroker(cfg Config) *Broker {
 	if cfg.DefaultNumPartitions <= 0 {
 		cfg.DefaultNumPartitions = DefaultNumPartitions
 	}
+
+	var rf *raft.Raft
+	var rs *raft.NetServer
+	if cfg.RaftPort > 0 {
+		peerID := fmt.Sprintf("%d", cfg.BrokerID)
+		rf = raft.NewRaft(peerID, cfg.RaftPeers)
+		var err error
+		rs, err = raft.StartRaftServer(rf, int(cfg.RaftPort))
+		if err != nil {
+			log.Fatalf("[miKago] Failed to start Raft server: %v", err)
+		}
+	}
+
 	return &Broker{
 		Config:       cfg,
 		TopicManager: NewTopicManager(cfg.DataDir, cfg.LogSegmentBytes, cfg.RetentionMs, int(cfg.DefaultNumPartitions)),
 		GroupManager: NewGroupManager(),
+		Raft:         rf,
+		RaftServer:   rs,
 	}
 }
 
 // Close shuts down the broker, flushing all data to disk.
 func (b *Broker) Close() error {
+	if b.RaftServer != nil {
+		b.RaftServer.Close()
+	}
 	return b.TopicManager.Close()
 }

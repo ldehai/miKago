@@ -7,10 +7,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/andy/mikago/internal/api"
 	"github.com/andy/mikago/internal/broker"
+	"github.com/andy/mikago/internal/raft"
 	"github.com/andy/mikago/internal/server"
 )
 
@@ -24,6 +26,8 @@ func main() {
 	maxReqBytes := flag.Int("max-request-bytes", 104857600, "Max request size in bytes (default: 100MB)")
 	logSegBytes := flag.Int64("log-segment-bytes", 1073741824, "Max log segment size in bytes (default: 1GB)")
 	retentionHours := flag.Int64("retention-hours", 168, "Data retention in hours (default: 168 = 7 days, -1 = forever)")
+	raftPort := flag.Int("raft-port", 0, "Raft RPC port (0 to disable cluster mode)")
+	peersStr := flag.String("peers", "", "Comma-separated list of raft peers (e.g., 1@localhost:8001,2@localhost:8002)")
 	flag.Parse()
 
 	// Banner
@@ -38,6 +42,17 @@ func main() {
 	`)
 
 	// Configure broker
+	var peers []raft.Peer
+	if *peersStr != "" {
+		peerList := strings.Split(*peersStr, ",")
+		for _, pStr := range peerList {
+			parts := strings.SplitN(pStr, "@", 2)
+			if len(parts) == 2 {
+				peers = append(peers, raft.Peer{ID: parts[0], Address: parts[1]})
+			}
+		}
+	}
+
 	cfg := broker.Config{
 		BrokerID:        int32(*brokerID),
 		Host:            *host,
@@ -47,6 +62,8 @@ func main() {
 		MaxRequestBytes: int32(*maxReqBytes),
 		LogSegmentBytes: *logSegBytes,
 		RetentionMs:     *retentionHours * 60 * 60 * 1000, // hours → ms
+		RaftPort:        int32(*raftPort),
+		RaftPeers:       peers,
 	}
 
 	// Initialize components

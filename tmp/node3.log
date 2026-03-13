@@ -1,0 +1,21 @@
+
+    _  __  _  _  __                
+   (_)|  \/ |(_)/ /   __ _  __ _  ___  
+   | || |\/| || / /__ / _' |/ _' |/ _ \ 
+   | || |  | || \___/| (_| || (_| || (_) |
+   |_||_|  |_||_|    \__,_| \__, |\___/ 
+                              |___/      
+   mini Kafka with Go — Phase 2 Persistent
+	
+2026/03/13 18:20:17 [miKago] Data directory: tmp/data3
+2026/03/13 18:20:17 [miKago] Limits: max_message=1024KB, max_request=100MB, segment=1024MB
+2026/03/13 18:20:17 [miKago] Retention: 168 hours
+2026/03/13 18:20:17 [Raft 3] Internal RPC listening on :8003
+2026/03/13 18:20:17 [miKago] Starting broker (id=3) on localhost:9093
+2026/03/13 18:20:17 [miKago] 🚀 Broker listening on localhost:9093
+2026/03/13 18:20:17 [Raft 3] Received RequestVote(Term:2, Candidate:2, LastLogIdx:0, LastLogTerm:0)
+2026/03/13 18:20:17 [Raft 3] Term 2: Becoming Follower
+2026/03/13 18:20:17 [Raft 3] Granted vote to 2 for term 2
+2026/03/13 18:20:29 [miKago] Received signal terminated, shutting down...
+2026/03/13 18:20:29 [miKago] Shutting down server...
+2026/03/13 18:20:29 [miKago] Broker stopped.
