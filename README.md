@@ -117,6 +117,7 @@ miKago/
 - [x] **Phase 5**: Zero-Copy Network I/O (using `sendfile` for `Fetch` API to bypass user-space memory)
 - [ ] **Phase 6**: Partition-Level Leadership (Fine-grained leader election per partition for load balancing)
 - [ ] **Phase 7**: Exactly-Once Semantics (EOS) / Idempotent Producers
+- [ ] **Phase 8**: Security (TLS/SSL Network Encryption & SASL Authentication/ACLs)
 
 ## License
 
