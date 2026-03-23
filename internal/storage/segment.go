@@ -289,6 +289,9 @@ func (s *Segment) Flush() error {
 
 // Sync forces the operating system to flush all data to the physical disk.
 func (s *Segment) Sync() error {
+	if err := s.logWriter.Flush(); err != nil {
+		return err
+	}
 	if err := s.logFile.Sync(); err != nil {
 		return err
 	}

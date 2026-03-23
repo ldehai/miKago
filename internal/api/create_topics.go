@@ -71,6 +71,9 @@ func HandleCreateTopics(header *protocol.RequestHeader, d *protocol.Decoder, b *
 
 	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
+	if header.APIVersion >= 1 {
+		enc.PutInt32(0) // throttle_time_ms
+	}
 	enc.PutArrayLength(len(reqs))
 
 	for _, req := range reqs {

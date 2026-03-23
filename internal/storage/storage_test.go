@@ -94,6 +94,11 @@ func TestSegmentAppendAndRead(t *testing.T) {
 	}
 	t.Logf("✅ Appended 25 records, logSize=%d bytes, indexCount=%d", seg.Size(), seg.indexCount)
 
+	// Flush buffer to disk for reading
+	if err := seg.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
 	// Read from offset 15
 	records, err := seg.ReadFrom(15, 1024*1024)
 	if err != nil {
