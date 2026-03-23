@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	// 命令行参数定义
+	// Define command-line flags
 	address := flag.String("address", "localhost:9092", "Kafka broker address")
 	topic := flag.String("topic", "benchmark-topic", "Topic to produce messages to")
 	partitions := flag.Int("partitions", 0, "Number of partitions (0 = auto-create with default 1)")
@@ -30,7 +30,7 @@ func main() {
 
 	flag.Parse()
 
-	// 如果指定了分区数，先创建 topic
+	// If partition count is specified, create the topic first
 	if *partitions > 0 {
 		topicName := fmt.Sprintf("%s-p%d", *topic, *partitions)
 		*topic = topicName
@@ -69,13 +69,13 @@ func main() {
 	}
 	defer writer.Close()
 
-	// 准备样本消息
+	// Prepare sample message
 	msgValue := make([]byte, *msgSize)
 	for i := 0; i < *msgSize; i++ {
 		msgValue[i] = byte(i % 256)
 	}
 
-	// 信号监听（按 Ctrl+C 也能看到统计结果）
+	// Signal listener (Ctrl+C to see results)
 	exitCh := make(chan os.Signal, 1)
 	signal.Notify(exitCh, os.Interrupt, syscall.SIGTERM)
 
@@ -107,7 +107,7 @@ func main() {
 		}(i)
 	}
 
-	// 等待完成
+	// Wait for completion
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
