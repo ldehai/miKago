@@ -52,9 +52,10 @@ func (e EncoderPayload) Release() error {
 // Writing this payload to a net.TCPConn will automatically invoke the
 // operating system's zero-copy 'sendfile' system call when supported.
 type FilePayload struct {
-	File   *os.File
-	Offset int64
-	Length int64
+	File        *os.File
+	Offset      int64
+	Length      int64
+	ShouldClose bool
 }
 
 func (f FilePayload) Size() int32 {
@@ -68,7 +69,7 @@ func (f FilePayload) WriteTo(w io.Writer) (int64, error) {
 }
 
 func (f FilePayload) Release() error {
-	if f.File != nil {
+	if f.File != nil && f.ShouldClose {
 		return f.File.Close()
 	}
 	return nil

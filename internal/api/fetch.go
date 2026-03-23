@@ -116,9 +116,10 @@ func HandleFetchZeroCopy(header *protocol.RequestHeader, body *protocol.Decoder,
 				
 				// Append the File Payload for Zero Copy
 				mp.Payloads = append(mp.Payloads, protocol.FilePayload{
-					File:   file,
-					Offset: fileOff,
-					Length: int64(bytesToRead),
+					File:        file,
+					Offset:      fileOff,
+					Length:      int64(bytesToRead),
+					ShouldClose: false,
 				})
 				
 				// Create a new encoder for any following partitions/topics

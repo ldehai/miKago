@@ -317,27 +317,14 @@ func (l *Log) FetchZeroCopy(startOffset int64, maxBytes int32) (*os.File, int64,
 		return nil, 0, 0, hwm
 	}
 
-	logPath := filepath.Join(seg.dir, segmentFileName(seg.baseOffset, ".log"))
-	f, err := os.Open(logPath)
-	if err != nil {
-		return nil, 0, 0, hwm
-	}
-
-	// Calculate how much we can read
-	fileInfo, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, 0, 0, hwm
-	}
-
-	availableBytes := fileInfo.Size() - position
+	// Calculate how much we can read from the persistent file descriptor
+	availableBytes := seg.logSize - position
 	bytesToRead := int32(availableBytes)
 	if bytesToRead > maxBytes {
 		bytesToRead = maxBytes
-		// Note: Kafka clients can handle truncated messages at the end of a fetch chunk.
 	}
 
-	return f, position, bytesToRead, hwm
+	return seg.logFile, position, bytesToRead, hwm
 }
 
 func (l *Log) findSegment(offset int64) int {
