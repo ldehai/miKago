@@ -20,6 +20,17 @@ func newTestBroker(t *testing.T) *broker.Broker {
 	return b
 }
 
+func payloadToBytes(t *testing.T, p protocol.Payload) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	_, err := p.WriteTo(&buf)
+	if err != nil {
+		t.Fatalf("failed to write payload to buffer: %v", err)
+	}
+	p.Release()
+	return buf.Bytes()
+}
+
 func TestApiVersions(t *testing.T) {
 	b := newTestBroker(t)
 
@@ -37,7 +48,7 @@ func TestApiVersions(t *testing.T) {
 	}
 
 	// Parse response
-	d := protocol.NewDecoder(resp)
+	d := protocol.NewDecoder(payloadToBytes(t, resp))
 
 	// correlation_id
 	corrID, _ := d.Int32()
@@ -86,7 +97,7 @@ func TestMetadata(t *testing.T) {
 	}
 
 	// Parse response
-	d := protocol.NewDecoder(resp)
+	d := protocol.NewDecoder(payloadToBytes(t, resp))
 
 	corrID, _ := d.Int32()
 	if corrID != 7 {
@@ -175,7 +186,7 @@ func TestProduceThenFetch(t *testing.T) {
 	}
 
 	// Parse produce response
-	d := protocol.NewDecoder(resp)
+	d := protocol.NewDecoder(payloadToBytes(t, resp))
 	corrID, _ := d.Int32()
 	if corrID != 10 {
 		t.Fatalf("expected correlation_id=10, got %d", corrID)
@@ -230,6 +241,7 @@ func TestProduceThenFetch(t *testing.T) {
 
 	var fetchBuf bytes.Buffer
 	fetchRespPayload.WriteTo(&fetchBuf)
+	fetchRespPayload.Release()
 	fetchResp := fetchBuf.Bytes()
 
 	// Parse fetch response
@@ -326,7 +338,7 @@ func TestConsumerGroupAPIs(t *testing.T) {
 		t.Fatalf("HandleOffsetCommit error: %v", err)
 	}
 
-	d := protocol.NewDecoder(commitResp)
+	d := protocol.NewDecoder(payloadToBytes(t, commitResp))
 	corrID, _ := d.Int32()
 	if corrID != 101 {
 		t.Fatalf("expected correlation_id=101, got %d", corrID)
@@ -368,7 +380,7 @@ func TestConsumerGroupAPIs(t *testing.T) {
 		t.Fatalf("HandleOffsetFetch error: %v", err)
 	}
 
-	d = protocol.NewDecoder(fetchResp)
+	d = protocol.NewDecoder(payloadToBytes(t, fetchResp))
 	corrID, _ = d.Int32()
 	if corrID != 102 {
 		t.Fatalf("expected correlation_id=102, got %d", corrID)
@@ -412,7 +424,7 @@ func TestConsumerGroupAPIs(t *testing.T) {
 		t.Fatalf("HandleFindCoordinator error: %v", err)
 	}
 
-	d = protocol.NewDecoder(fcResp)
+	d = protocol.NewDecoder(payloadToBytes(t, fcResp))
 	corrID, _ = d.Int32()
 	if corrID != 103 {
 		t.Fatalf("expected correlation_id=103, got %d", corrID)
@@ -467,7 +479,7 @@ func TestCreateTopicsAPI(t *testing.T) {
 		t.Fatalf("HandleCreateTopics error: %v", err)
 	}
 
-	d := protocol.NewDecoder(respBytes)
+	d := protocol.NewDecoder(payloadToBytes(t, respBytes))
 	corrID, _ := d.Int32()
 	if corrID != 200 {
 		t.Fatalf("expected correlation_id=200, got %d", corrID)

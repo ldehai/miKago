@@ -9,7 +9,7 @@ import (
 )
 
 // HandleOffsetCommit processes an OffsetCommit v0 request (API key 8).
-func HandleOffsetCommit(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) ([]byte, error) {
+func HandleOffsetCommit(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
 	// Request structure v0:
 	// group_id (string)
 	// [topics]
@@ -74,7 +74,7 @@ func HandleOffsetCommit(header *protocol.RequestHeader, d *protocol.Decoder, b *
 	//     partition_index (int32)
 	//     error_code (int16)
 
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 	enc.PutArrayLength(len(responses))
 
@@ -87,5 +87,5 @@ func HandleOffsetCommit(header *protocol.RequestHeader, d *protocol.Decoder, b *
 		}
 	}
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }

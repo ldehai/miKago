@@ -6,13 +6,13 @@ import (
 )
 
 // HandleFindCoordinator processes a FindCoordinator v0 request (API key 10).
-func HandleFindCoordinator(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) ([]byte, error) {
+func HandleFindCoordinator(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
 	// Request structure:
 	// group_id (string)
 
 	_, _ = d.String() // group_id, unused since we only have 1 broker
 
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
 	// Response structure:
@@ -26,5 +26,5 @@ func HandleFindCoordinator(header *protocol.RequestHeader, d *protocol.Decoder, 
 	enc.PutString(b.Config.Host)
 	enc.PutInt32(b.Config.Port)
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }

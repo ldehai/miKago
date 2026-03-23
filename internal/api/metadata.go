@@ -13,7 +13,7 @@ import (
 // Metadata v1 adds:
 //   - Request: same as v0 (null array = all topics)
 //   - Response: brokers get "rack" field, topics get "is_internal" field, adds "controller_id"
-func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) ([]byte, error) {
+func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
 	// Parse request: array of topic names
 	topicCount, err := body.ArrayLength()
 	if err != nil {
@@ -34,7 +34,7 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 		}
 	}
 
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
 	// Brokers array
@@ -91,5 +91,5 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 		}
 	}
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }

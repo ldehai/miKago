@@ -22,7 +22,7 @@ import (
 //
 //	v0 (magic=0): offset, size, crc, magic, attributes, key, value
 //	v1 (magic=1): offset, size, crc, magic, attributes, timestamp, key, value
-func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) ([]byte, error) {
+func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
 	// Parse request
 	acks, err := body.Int16()
 	if err != nil {
@@ -157,7 +157,7 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 	}
 
 	// Encode response
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
 	enc.PutArrayLength(len(results))
@@ -180,7 +180,7 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 		enc.PutInt32(0)
 	}
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }
 
 // rawMessage is a parsed message from a MessageSet.
@@ -198,7 +198,8 @@ func parseMessageSet(data []byte) []rawMessage {
 		return nil
 	}
 
-	d := protocol.NewDecoder(data)
+	d := protocol.GetDecoder(data)
+	defer protocol.PutDecoder(d)
 	var messages []rawMessage
 
 	for d.Remaining() >= 12 {

@@ -21,7 +21,8 @@ func NewHandler(b *broker.Broker) *Handler {
 // HandleRequest processes a raw Kafka request and returns the response payload.
 // The input is the request body (after the 4-byte size prefix has been stripped).
 func (h *Handler) HandleRequest(data []byte) (protocol.Payload, error) {
-	decoder := protocol.NewDecoder(data)
+	decoder := protocol.GetDecoder(data)
+	defer protocol.PutDecoder(decoder)
 
 	header, err := protocol.DecodeRequestHeader(decoder)
 	if err != nil {
@@ -31,35 +32,35 @@ func (h *Handler) HandleRequest(data []byte) (protocol.Payload, error) {
 	log.Printf("[miKago] Request: api_key=%d, api_version=%d, correlation_id=%d, client_id=%v",
 		header.APIKey, header.APIVersion, header.CorrelationID, header.ClientID)
 
-	var respBytes []byte
+	var respPayload protocol.Payload
 
 	switch header.APIKey {
 	case protocol.APIKeyApiVersions:
-		respBytes, err = HandleApiVersions(header, decoder, h.Broker)
+		respPayload, err = HandleApiVersions(header, decoder, h.Broker)
 
 	case protocol.APIKeyMetadata:
-		respBytes, err = HandleMetadata(header, decoder, h.Broker)
+		respPayload, err = HandleMetadata(header, decoder, h.Broker)
 
 	case protocol.APIKeyProduce:
-		respBytes, err = HandleProduce(header, decoder, h.Broker)
+		respPayload, err = HandleProduce(header, decoder, h.Broker)
 
 	case protocol.APIKeyFetch:
 		return HandleFetchZeroCopy(header, decoder, h.Broker)
 
 	case protocol.APIKeyListOffsets:
-		respBytes, err = HandleListOffsets(header, decoder, h.Broker)
+		respPayload, err = HandleListOffsets(header, decoder, h.Broker)
 
 	case protocol.APIKeyCreateTopics:
-		respBytes, err = HandleCreateTopics(header, decoder, h.Broker)
+		respPayload, err = HandleCreateTopics(header, decoder, h.Broker)
 
 	case protocol.APIKeyOffsetCommit:
-		respBytes, err = HandleOffsetCommit(header, decoder, h.Broker)
+		respPayload, err = HandleOffsetCommit(header, decoder, h.Broker)
 
 	case protocol.APIKeyOffsetFetch:
-		respBytes, err = HandleOffsetFetch(header, decoder, h.Broker)
+		respPayload, err = HandleOffsetFetch(header, decoder, h.Broker)
 
 	case protocol.APIKeyFindCoordinator:
-		respBytes, err = HandleFindCoordinator(header, decoder, h.Broker)
+		respPayload, err = HandleFindCoordinator(header, decoder, h.Broker)
 
 	default:
 		log.Printf("[miKago] Unsupported API key: %d", header.APIKey)
@@ -69,13 +70,13 @@ func (h *Handler) HandleRequest(data []byte) (protocol.Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	return protocol.BytesPayload(respBytes), nil
+	return respPayload, nil
 }
 
 // unsupportedAPIResponse creates an error response for unsupported API keys.
 func (h *Handler) unsupportedAPIResponse(header *protocol.RequestHeader) protocol.Payload {
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 	enc.PutInt16(protocol.ErrUnsupportedVersion)
-	return protocol.BytesPayload(enc.Bytes())
+	return protocol.EncoderPayload{Encoder: enc}
 }

@@ -13,3 +13,4 @@
 # Go
 vendor/
 tmp/
+data/

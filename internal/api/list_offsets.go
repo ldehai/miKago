@@ -29,7 +29,7 @@ import (
 //	    offset (INT64)
 //	  ]
 //	]
-func HandleListOffsets(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) ([]byte, error) {
+func HandleListOffsets(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
 	_, err := body.Int32() // replica_id
 	if err != nil {
 		return nil, err
@@ -95,7 +95,7 @@ func HandleListOffsets(header *protocol.RequestHeader, body *protocol.Decoder, b
 	}
 
 	// Build response
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
 	enc.PutArrayLength(len(requests))
@@ -156,5 +156,5 @@ func HandleListOffsets(header *protocol.RequestHeader, body *protocol.Decoder, b
 		}
 	}
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }

@@ -9,7 +9,7 @@ import (
 )
 
 // HandleCreateTopics processes a CreateTopics v0/v1 request (API key 19).
-func HandleCreateTopics(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) ([]byte, error) {
+func HandleCreateTopics(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
 	// Request structure (v0/v1):
 	// [topics]
 	//   name (string)
@@ -69,7 +69,7 @@ func HandleCreateTopics(header *protocol.RequestHeader, d *protocol.Decoder, b *
 		validateOnly, _ = d.Bool()
 	}
 
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 	enc.PutArrayLength(len(reqs))
 
@@ -96,5 +96,5 @@ func HandleCreateTopics(header *protocol.RequestHeader, d *protocol.Decoder, b *
 		enc.PutInt16(errCode)
 	}
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }

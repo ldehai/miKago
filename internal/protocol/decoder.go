@@ -3,7 +3,28 @@ package protocol
 import (
 	"encoding/binary"
 	"fmt"
+	"sync"
 )
+
+var decoderPool = sync.Pool{
+	New: func() interface{} {
+		return &Decoder{}
+	},
+}
+
+// GetDecoder retrieves a Decoder from the pool and initializes it with the given data.
+func GetDecoder(data []byte) *Decoder {
+	d := decoderPool.Get().(*Decoder)
+	d.raw = data
+	d.off = 0
+	return d
+}
+
+// PutDecoder returns a Decoder to the pool.
+func PutDecoder(d *Decoder) {
+	d.raw = nil
+	decoderPool.Put(d)
+}
 
 // Decoder reads Kafka binary protocol data from a byte slice.
 type Decoder struct {

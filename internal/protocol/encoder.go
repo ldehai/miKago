@@ -3,7 +3,25 @@ package protocol
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 )
+
+var encoderPool = sync.Pool{
+	New: func() interface{} {
+		return &Encoder{}
+	},
+}
+
+// GetEncoder retrieves an Encoder from the pool.
+func GetEncoder() *Encoder {
+	return encoderPool.Get().(*Encoder)
+}
+
+// PutEncoder returns an Encoder to the pool after resetting it.
+func PutEncoder(e *Encoder) {
+	e.Reset()
+	encoderPool.Put(e)
+}
 
 // Encoder writes Kafka binary protocol data to a buffer.
 type Encoder struct {

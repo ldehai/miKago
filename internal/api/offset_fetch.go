@@ -8,7 +8,7 @@ import (
 )
 
 // HandleOffsetFetch processes an OffsetFetch v1 request (API key 9).
-func HandleOffsetFetch(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) ([]byte, error) {
+func HandleOffsetFetch(header *protocol.RequestHeader, d *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
 	// Request structure v1:
 	// group_id (string)
 	// [topics]
@@ -78,7 +78,7 @@ func HandleOffsetFetch(header *protocol.RequestHeader, d *protocol.Decoder, b *b
 	//     metadata (string)
 	//     error_code (int16)
 
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 	enc.PutArrayLength(len(responses))
 
@@ -93,5 +93,5 @@ func HandleOffsetFetch(header *protocol.RequestHeader, d *protocol.Decoder, b *b
 		}
 	}
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }

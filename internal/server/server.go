@@ -88,8 +88,8 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		// Read the 4-byte message size
-		sizeBuf := make([]byte, 4)
-		_, err := io.ReadFull(conn, sizeBuf)
+		var sizeBuf [4]byte
+		_, err := io.ReadFull(conn, sizeBuf[:])
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("[miKago] Error reading size from %s: %v", remoteAddr, err)
@@ -97,7 +97,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		msgSize := binary.BigEndian.Uint32(sizeBuf)
+		msgSize := binary.BigEndian.Uint32(sizeBuf[:])
 		if msgSize == 0 || msgSize > uint32(s.maxRequestBytes) {
 			log.Printf("[miKago] Invalid message size %d from %s", msgSize, remoteAddr)
 			return
@@ -125,9 +125,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		// Write the response size prefix first
-		respSizeBuf := make([]byte, 4)
-		binary.BigEndian.PutUint32(respSizeBuf, uint32(responsePayload.Size()))
-		_, err = conn.Write(respSizeBuf)
+		var respSizeBuf [4]byte
+		binary.BigEndian.PutUint32(respSizeBuf[:], uint32(responsePayload.Size()))
+		_, err = conn.Write(respSizeBuf[:])
 		if err != nil {
 			log.Printf("[miKago] Error writing response size to %s: %v", remoteAddr, err)
 			return
@@ -135,6 +135,8 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 		// Write the actual payload (potentially zero-copy sendfile)
 		_, err = responsePayload.WriteTo(conn)
+		responsePayload.Release()
+
 		if err != nil {
 			log.Printf("[miKago] Error writing response payload to %s: %v", remoteAddr, err)
 			return

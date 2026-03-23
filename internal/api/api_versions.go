@@ -11,8 +11,8 @@ import (
 // ApiVersions v0 Response: error_code, [api_versions: api_key, min_version, max_version]
 //
 // ApiVersions v1 Response: same as v0 + throttle_time_ms at the end
-func HandleApiVersions(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) ([]byte, error) {
-	enc := protocol.NewEncoder()
+func HandleApiVersions(header *protocol.RequestHeader, body *protocol.Decoder, b *broker.Broker) (protocol.Payload, error) {
+	enc := protocol.GetEncoder()
 
 	// Response header
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
@@ -34,5 +34,5 @@ func HandleApiVersions(header *protocol.RequestHeader, body *protocol.Decoder, b
 		enc.PutInt32(0) // throttle_time_ms
 	}
 
-	return enc.Bytes(), nil
+	return protocol.EncoderPayload{Encoder: enc}, nil
 }

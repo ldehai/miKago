@@ -78,7 +78,7 @@ func HandleFetchZeroCopy(header *protocol.RequestHeader, body *protocol.Decoder,
 	mp := protocol.MultiPayload{}
 
 	// Initial header encoder
-	enc := protocol.NewEncoder()
+	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
 	// v2+: throttle_time_ms at the beginning
@@ -122,7 +122,7 @@ func HandleFetchZeroCopy(header *protocol.RequestHeader, body *protocol.Decoder,
 				})
 				
 				// Create a new encoder for any following partitions/topics
-				enc = protocol.NewEncoder()
+				enc = protocol.GetEncoder()
 			}
 		}
 	}

@@ -10,6 +10,7 @@ import (
 type Payload interface {
 	Size() int32
 	WriteTo(w io.Writer) (int64, error)
+	Release() error
 }
 
 // BytesPayload wraps a pure byte slice.
@@ -24,6 +25,10 @@ func (b BytesPayload) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
+func (b BytesPayload) Release() error {
+	return nil
+}
+
 // EncoderPayload adapts an Encoder buffer to the Payload interface.
 type EncoderPayload struct {
 	Encoder *Encoder
@@ -36,6 +41,11 @@ func (e EncoderPayload) Size() int32 {
 func (e EncoderPayload) WriteTo(w io.Writer) (int64, error) {
 	n, err := w.Write(e.Encoder.Bytes())
 	return int64(n), err
+}
+
+func (e EncoderPayload) Release() error {
+	PutEncoder(e.Encoder)
+	return nil
 }
 
 // FilePayload represents a contiguous chunk of a file.
@@ -55,6 +65,13 @@ func (f FilePayload) WriteTo(w io.Writer) (int64, error) {
 	// Let io.Copy utilize io.ReaderFrom if available (e.g. net.TCPConn)
 	// which will seamlessly call sendfile under the hood!
 	return io.Copy(w, io.NewSectionReader(f.File, f.Offset, f.Length))
+}
+
+func (f FilePayload) Release() error {
+	if f.File != nil {
+		return f.File.Close()
+	}
+	return nil
 }
 
 // MultiPayload aggregates multiple payloads sequentially.
@@ -80,4 +97,14 @@ func (m MultiPayload) WriteTo(w io.Writer) (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+func (m MultiPayload) Release() error {
+	var firstErr error
+	for _, p := range m.Payloads {
+		if err := p.Release(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
