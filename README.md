@@ -108,6 +108,82 @@ miKago/
 | ApiVersions | 18 | v0-v1 | Client capability handshake |
 | CreateTopics | 19 | v0-v1 | Explicit topic creation with custom partition counts |
 
+---
+
+## ⚡ Performance Benchmark
+
+miKago ships with two benchmark tools to measure write throughput.
+
+### Benchmark Tool (`cmd/benchmark`)
+
+Uses the standard `segmentio/kafka-go` client library. Ideal for testing real-world Kafka client compatibility.
+
+```bash
+# Build
+go build -o benchmark ./cmd/benchmark/
+
+# Basic run (10 workers, 100K messages, 1KB each, async mode)
+./benchmark -concurrency 10 -num 100000 -msg-size 1024 -async=true -batch 100
+
+# Multi-partition test (auto-creates topic with 10 partitions)
+./benchmark -concurrency 10 -num 100000 -partitions 10
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-address` | `localhost:9092` | Broker address |
+| `-topic` | `benchmark-topic` | Topic name |
+| `-concurrency` | `10` | Number of concurrent workers |
+| `-num` | `100000` | Total messages to produce |
+| `-msg-size` | `1024` | Message size in bytes |
+| `-async` | `true` | Async produce mode |
+| `-batch` | `100` | Producer batch size |
+| `-partitions` | `0` | Partitions (0 = auto-create default) |
+
+### Raw TCP Benchmark (`cmd/rawbench`)
+
+Uses the native Kafka binary protocol directly over raw TCP sockets. Bypasses all client-library overhead to measure the server's true throughput ceiling.
+
+```bash
+# Build
+go build -o rawbench ./cmd/rawbench/
+
+# Maximum throughput test (10 connections, 1M messages, 500 msgs/request)
+./rawbench -workers 10 -num 1000000 -msg-size 1024 -batch 500
+
+# Multi-partition test
+./rawbench -workers 10 -num 1000000 -batch 500 -partitions 10
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-address` | `localhost:9092` | Broker address |
+| `-topic` | `raw-bench` | Topic name |
+| `-workers` | `10` | Concurrent TCP connections |
+| `-num` | `100000` | Total messages to produce |
+| `-msg-size` | `1024` | Message size in bytes |
+| `-batch` | `500` | Messages per Produce request |
+| `-partitions` | `1` | Number of partitions |
+
+### Results (MacBook Pro, Apple Silicon, 1KB messages)
+
+| Scenario | QPS | Throughput |
+|:---------|:----|:-----------|
+| kafka-go, 1 partition, async | 884,006 msgs/sec | 863 MB/sec |
+| kafka-go, 10 partitions, async | 840,305 msgs/sec | 821 MB/sec |
+| **Raw TCP, 1 partition** | **1,381,599 msgs/sec** | **1,349 MB/sec** |
+| **Raw TCP, 10 partitions** | **1,537,908 msgs/sec** | **1,502 MB/sec** |
+
+### Write Path Optimizations
+
+miKago achieves high throughput through several key optimizations in the storage engine:
+
+*   **Ring Buffer Batch Writer** — Concurrent producers push to a lock-free ring buffer; a single writer goroutine pops batches and writes them under one lock with one `Flush()` syscall.
+*   **Batch Produce API** — `HandleProduce` sends an entire `MessageSet` as a single batch through the ring buffer (1 channel round-trip for N messages).
+*   **Pooled Single-Write Encoding** — `EncodeRecord` uses `sync.Pool` buffers to combine header + key + value into a single `Write()` call.
+*   **Buffered I/O** — Both log files (256KB buffer) and index files (4KB buffer) use `bufio.Writer` to minimize syscalls.
+*   **Zero-Copy Fetch** — The `Fetch` API uses OS-level `sendfile` to stream data directly from disk to network socket.
+
 ## 🗺️ Project Roadmap
 
 - [x] **Phase 1**: In-memory TCP protocol scaffold (`ApiVersions`, `Metadata`, `Produce`, `Fetch`)

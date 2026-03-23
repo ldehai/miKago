@@ -15,6 +15,7 @@ const (
 
 // Error Codes
 const (
+	ErrUnknownServerError       int16 = -1
 	ErrNone                     int16 = 0
 	ErrOffsetOutOfRange         int16 = 1
 	ErrUnknownTopicOrPartition  int16 = 3

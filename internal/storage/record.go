@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -24,10 +25,17 @@ func RecordSize(key, value []byte) int {
 	return RecordHeaderSize + len(key) + len(value)
 }
 
-// EncodeRecord writes a record to the writer in official Kafka MessageSet v1 binary format.
-func EncodeRecord(w io.Writer, r *Record) error {
-	var buf [RecordHeaderSize]byte
+// encodeBufPool pools byte slices used by EncodeRecord to avoid per-record allocations.
+var encodeBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
 
+// EncodeRecord writes a record to the writer in official Kafka MessageSet v1 binary format.
+// Uses a pooled buffer to combine header + key + value into a single Write() call.
+func EncodeRecord(w io.Writer, r *Record) error {
 	keyLen := len(r.Key)
 	if r.Key == nil {
 		keyLen = -1
@@ -37,51 +45,58 @@ func EncodeRecord(w io.Writer, r *Record) error {
 		valueLen = -1
 	}
 
-	// message_size doesn't include the offset(8) and size(4) itself.
-	// 4(crc) + 1(magic) + 1(attr) + 8(ts) + 4(keyLen) + len(key) + 4(valLen) + len(val)
-	sizePayload := 22 + keyLen + valueLen
-	if keyLen < 0 {
-		sizePayload += 1 // to offset -1 math if needed, wait, 22 is fixed, len(key) is just used for math.
-		// wait, let's just use exact length.
-		sizePayload = 22
-		if keyLen > 0 {
-			sizePayload += keyLen
-		}
-		if valueLen > 0 {
-			sizePayload += valueLen
-		}
+	// message_size: 4(crc) + 1(magic) + 1(attr) + 8(ts) + 4(keyLen) + len(key) + 4(valLen) + len(val)
+	actualKeyLen := keyLen
+	if actualKeyLen < 0 {
+		actualKeyLen = 0
+	}
+	actualValueLen := valueLen
+	if actualValueLen < 0 {
+		actualValueLen = 0
+	}
+	sizePayload := 22 + actualKeyLen + actualValueLen
+
+	totalSize := RecordHeaderSize + actualKeyLen + actualValueLen
+
+	// Get a pooled buffer
+	bp := encodeBufPool.Get().(*[]byte)
+	buf := *bp
+	if cap(buf) < totalSize {
+		buf = make([]byte, totalSize)
 	} else {
-		sizePayload = 22 + keyLen
-		if valueLen > 0 {
-			sizePayload += valueLen
-		}
+		buf = buf[:totalSize]
 	}
 
+	// Encode header
 	binary.BigEndian.PutUint64(buf[0:8], uint64(r.Offset))
 	binary.BigEndian.PutUint32(buf[8:12], uint32(sizePayload))
 	binary.BigEndian.PutUint32(buf[12:16], 0) // TODO: CRC32
-	buf[16] = 1 // Magic = 1 (v1)
-	buf[17] = 0 // Attributes = 0
+	buf[16] = 1                               // Magic = 1 (v1)
+	buf[17] = 0                               // Attributes = 0
 	binary.BigEndian.PutUint64(buf[18:26], uint64(r.Timestamp.UnixMilli()))
 	binary.BigEndian.PutUint32(buf[26:30], uint32(int32(keyLen)))
 	binary.BigEndian.PutUint32(buf[30:34], uint32(int32(valueLen)))
 
-	if _, err := w.Write(buf[:]); err != nil {
-		return fmt.Errorf("write record header: %w", err)
+	// Copy key and value into the same buffer
+	pos := RecordHeaderSize
+	if actualKeyLen > 0 {
+		copy(buf[pos:], r.Key)
+		pos += actualKeyLen
+	}
+	if actualValueLen > 0 {
+		copy(buf[pos:], r.Value)
 	}
 
-	if keyLen > 0 {
-		if _, err := w.Write(r.Key); err != nil {
-			return fmt.Errorf("write record key: %w", err)
-		}
-	}
+	// Single Write() call
+	_, err := w.Write(buf)
 
-	if valueLen > 0 {
-		if _, err := w.Write(r.Value); err != nil {
-			return fmt.Errorf("write record value: %w", err)
-		}
-	}
+	// Return buffer to pool
+	*bp = buf
+	encodeBufPool.Put(bp)
 
+	if err != nil {
+		return fmt.Errorf("write record: %w", err)
+	}
 	return nil
 }
 

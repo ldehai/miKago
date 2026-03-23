@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +21,7 @@ func main() {
 	// 命令行参数定义
 	address := flag.String("address", "localhost:9092", "Kafka broker address")
 	topic := flag.String("topic", "benchmark-topic", "Topic to produce messages to")
+	partitions := flag.Int("partitions", 0, "Number of partitions (0 = auto-create with default 1)")
 	concurrency := flag.Int("concurrency", 10, "Number of concurrent workers")
 	msgSize := flag.Int("msg-size", 1024, "Message size in bytes")
 	totalMsgs := flag.Int("num", 100000, "Total number of messages to produce")
@@ -27,6 +30,19 @@ func main() {
 
 	flag.Parse()
 
+	// 如果指定了分区数，先创建 topic
+	if *partitions > 0 {
+		topicName := fmt.Sprintf("%s-p%d", *topic, *partitions)
+		*topic = topicName
+		fmt.Printf("📦 Creating topic %q with %d partitions...\n", *topic, *partitions)
+		err := createTopic(*address, *topic, *partitions)
+		if err != nil {
+			fmt.Printf("⚠️  Topic creation: %v (may already exist)\n", err)
+		} else {
+			fmt.Printf("✅ Topic %q created with %d partitions\n", *topic, *partitions)
+		}
+	}
+
 	fmt.Println("----------------------------------------------------------------")
 	fmt.Println("🚀 miKago PERFORMANCE BENCHMARK TOOL")
 	fmt.Printf("📍 Broker:      %s\n", *address)
@@ -34,13 +50,18 @@ func main() {
 	fmt.Printf("📦 Message:     %d bytes\n", *msgSize)
 	fmt.Printf("🧵 Concurrency: %d workers\n", *concurrency)
 	fmt.Printf("🔢 Total:       %d messages\n", *totalMsgs)
+	if *partitions > 0 {
+		fmt.Printf("🗂️  Partitions:  %d\n", *partitions)
+	} else {
+		fmt.Printf("🗂️  Partitions:  1 (auto-created default)\n")
+	}
 	fmt.Printf("⚡ Mode:        Async=%v, Batch=%d\n", *async, *batchSize)
 	fmt.Println("----------------------------------------------------------------")
 
 	writer := &kafka.Writer{
 		Addr:                   kafka.TCP(*address),
 		Topic:                  *topic,
-		Balancer:               &kafka.LeastBytes{},
+		Balancer:               &kafka.RoundRobin{},
 		AllowAutoTopicCreation: true,
 		Async:                  *async,
 		BatchSize:              *batchSize,
@@ -79,7 +100,6 @@ func main() {
 					return
 				}
 				
-				// 采样收集时延 (只在异步/同步开关开启时有意义)
 				latMu.Lock()
 				latencies = append(latencies, time.Since(mStart))
 				latMu.Unlock()
@@ -103,7 +123,6 @@ func main() {
 
 	elapsed := time.Since(start)
 	
-	// 结果统计输出
 	actualCount := len(latencies)
 	qps := float64(actualCount) / elapsed.Seconds()
 	throughput := (float64(actualCount*(*msgSize)) / 1024 / 1024) / elapsed.Seconds()
@@ -121,3 +140,28 @@ func main() {
 	}
 	fmt.Println("----------------------------------------------------------------")
 }
+
+func createTopic(broker, topic string, partitions int) error {
+	conn, err := kafka.Dial("tcp", broker)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	controller, err := conn.Controller()
+	if err != nil {
+		return err
+	}
+	controllerConn, err := kafka.Dial("tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		return err
+	}
+	defer controllerConn.Close()
+
+	return controllerConn.CreateTopics(kafka.TopicConfig{
+		Topic:             topic,
+		NumPartitions:     partitions,
+		ReplicationFactor: 1,
+	})
+}
+

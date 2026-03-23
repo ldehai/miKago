@@ -31,6 +31,7 @@ type Segment struct {
 	dir           string    // directory path
 	lastTimestamp time.Time // timestamp of the last record written
 	logWriter     *bufio.Writer // buffered writer for log file
+	indexWriter   *bufio.Writer // buffered writer for index file
 }
 
 // segmentFileName generates the 20-digit zero-padded filename for a segment.
@@ -73,14 +74,15 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 	}
 
 	s := &Segment{
-		baseOffset: baseOffset,
-		nextOffset: baseOffset,
-		logFile:    logFile,
-		indexFile:  indexFile,
-		logSize:    logStat.Size(),
-		indexCount: int(indexStat.Size() / IndexEntrySize),
-		dir:        dir,
-		logWriter:  bufio.NewWriterSize(logFile, 64*1024),
+		baseOffset:  baseOffset,
+		nextOffset:  baseOffset,
+		logFile:     logFile,
+		indexFile:   indexFile,
+		logSize:     logStat.Size(),
+		indexCount:  int(indexStat.Size() / IndexEntrySize),
+		dir:         dir,
+		logWriter:   bufio.NewWriterSize(logFile, 256*1024),
+		indexWriter: bufio.NewWriterSize(indexFile, 4*1024),
 	}
 
 	return s, nil
@@ -155,7 +157,7 @@ func (s *Segment) writeIndexEntry(relativeOffset int32, position int32) error {
 	binary.BigEndian.PutUint32(buf[0:4], uint32(relativeOffset))
 	binary.BigEndian.PutUint32(buf[4:8], uint32(position))
 
-	if _, err := s.indexFile.Write(buf[:]); err != nil {
+	if _, err := s.indexWriter.Write(buf[:]); err != nil {
 		return fmt.Errorf("write index entry: %w", err)
 	}
 	s.indexCount++
@@ -284,12 +286,15 @@ func (s *Segment) Size() int64 {
 
 // Flush pushes memory-buffered data to the operating system's page cache.
 func (s *Segment) Flush() error {
-	return s.logWriter.Flush()
+	if err := s.logWriter.Flush(); err != nil {
+		return err
+	}
+	return s.indexWriter.Flush()
 }
 
 // Sync forces the operating system to flush all data to the physical disk.
 func (s *Segment) Sync() error {
-	if err := s.logWriter.Flush(); err != nil {
+	if err := s.Flush(); err != nil {
 		return err
 	}
 	if err := s.logFile.Sync(); err != nil {

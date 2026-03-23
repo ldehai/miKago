@@ -15,10 +15,29 @@ type ProduceResult struct {
 	Err    error
 }
 
+// BatchProduceRequest allows pushing multiple records as a single ring buffer item.
+// All records share a single result channel to avoid per-message channel overhead.
+type BatchProduceRequest struct {
+	Keys       [][]byte
+	Values     [][]byte
+	ResultChan chan BatchProduceResult
+}
+
+type BatchProduceResult struct {
+	BaseOffset int64
+	Err        error
+}
+
+// RingItem is a union type for individual and batch produce requests.
+type RingItem struct {
+	Single *ProduceRequest
+	Batch  *BatchProduceRequest
+}
+
 type RingBuffer struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
-	items  []*ProduceRequest
+	items  []RingItem
 	head   int
 	tail   int
 	count  int
@@ -28,7 +47,7 @@ type RingBuffer struct {
 
 func NewRingBuffer(size int) *RingBuffer {
 	rb := &RingBuffer{
-		items: make([]*ProduceRequest, size),
+		items: make([]RingItem, size),
 		size:  size,
 	}
 	rb.cond = sync.NewCond(&rb.mu)
@@ -46,14 +65,33 @@ func (rb *RingBuffer) Push(req *ProduceRequest) bool {
 		return false
 	}
 
-	rb.items[rb.tail] = req
+	rb.items[rb.tail] = RingItem{Single: req}
 	rb.tail = (rb.tail + 1) % rb.size
 	rb.count++
 	rb.cond.Signal()
 	return true
 }
 
-func (rb *RingBuffer) PopBatch(maxBatch int) []*ProduceRequest {
+// PushBatch pushes an entire batch as a single ring buffer item.
+func (rb *RingBuffer) PushBatch(req *BatchProduceRequest) bool {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	for rb.count == rb.size && !rb.closed {
+		rb.cond.Wait()
+	}
+	if rb.closed {
+		return false
+	}
+
+	rb.items[rb.tail] = RingItem{Batch: req}
+	rb.tail = (rb.tail + 1) % rb.size
+	rb.count++
+	rb.cond.Signal()
+	return true
+}
+
+func (rb *RingBuffer) PopBatch(maxBatch int) []RingItem {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
@@ -69,10 +107,10 @@ func (rb *RingBuffer) PopBatch(maxBatch int) []*ProduceRequest {
 		batchSize = maxBatch
 	}
 
-	batch := make([]*ProduceRequest, batchSize)
+	batch := make([]RingItem, batchSize)
 	for i := 0; i < batchSize; i++ {
 		batch[i] = rb.items[rb.head]
-		rb.items[rb.head] = nil
+		rb.items[rb.head] = RingItem{}
 		rb.head = (rb.head + 1) % rb.size
 	}
 	rb.count -= batchSize

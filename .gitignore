@@ -13,7 +13,12 @@
 # Go
 vendor/
 tmp/
-data/
-tmp/
-mikago
 *.log
+
+# Data directories
+data/
+data_bench/
+
+# Benchmark binaries
+/benchmark
+/rawbench

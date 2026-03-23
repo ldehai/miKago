@@ -60,7 +60,7 @@ func NewLogWithConfig(dir string, maxSegmentBytes int64) (*Log, error) {
 		l.activeSegment = seg
 	}
 
-	l.ringBuffer = NewRingBuffer(4096)
+	l.ringBuffer = NewRingBuffer(16384)
 	l.startWriter()
 
 	return l, nil
@@ -186,7 +186,47 @@ func (l *Log) Append(key, value []byte) (int64, error) {
 	return res.Offset, res.Err
 }
 
+// AppendBatch adds multiple messages to the log as a single ring buffer item.
+// Returns the base offset (offset of the first record in the batch).
+func (l *Log) AppendBatch(keys, values [][]byte) (int64, error) {
+	resChan := make(chan BatchProduceResult, 1)
+	req := &BatchProduceRequest{
+		Keys:       keys,
+		Values:     values,
+		ResultChan: resChan,
+	}
+
+	if !l.ringBuffer.PushBatch(req) {
+		return 0, fmt.Errorf("partition log is closing or buffer is full")
+	}
+
+	res := <-resChan
+	return res.BaseOffset, res.Err
+}
+
 // Internal implementation removed in favor of batch processing in startWriter.
+
+// appendRecord is the inner loop for writing a single record to the active segment.
+func (l *Log) appendRecord(key, value []byte, now time.Time) (int64, error) {
+	if l.activeSegment.Size() >= l.maxSegmentBytes {
+		if err := l.rollSegment(); err != nil {
+			return 0, err
+		}
+	}
+
+	offset := l.activeSegment.NextOffset()
+	rec := &Record{
+		Offset:    offset,
+		Timestamp: now,
+		Key:       key,
+		Value:     value,
+	}
+
+	if _, err := l.activeSegment.Append(rec); err != nil {
+		return 0, err
+	}
+	return offset, nil
+}
 
 func (l *Log) startWriter() {
 	l.writerWG.Add(1)
@@ -200,29 +240,32 @@ func (l *Log) startWriter() {
 
 			// Single lock for the entire batch to reduce contention
 			l.mu.Lock()
-			for _, req := range batch {
-				// Roll segment if full
-				if l.activeSegment.Size() >= l.maxSegmentBytes {
-					if err := l.rollSegment(); err != nil {
-						req.ResultChan <- ProduceResult{Err: err}
-						continue
+			now := time.Now() // One timestamp for the entire batch
+
+			for _, item := range batch {
+				if item.Single != nil {
+					offset, err := l.appendRecord(item.Single.Key, item.Single.Value, now)
+					if err != nil {
+						item.Single.ResultChan <- ProduceResult{Err: err}
+					} else {
+						item.Single.ResultChan <- ProduceResult{Offset: offset, Err: nil}
 					}
+				} else if item.Batch != nil {
+					bReq := item.Batch
+					var baseOffset int64 = -1
+					var batchErr error
+					for i := range bReq.Keys {
+						off, err := l.appendRecord(bReq.Keys[i], bReq.Values[i], now)
+						if err != nil {
+							batchErr = err
+							break
+						}
+						if i == 0 {
+							baseOffset = off
+						}
+					}
+					bReq.ResultChan <- BatchProduceResult{BaseOffset: baseOffset, Err: batchErr}
 				}
-
-				offset := l.activeSegment.NextOffset()
-				rec := &Record{
-					Offset:    offset,
-					Timestamp: time.Now(),
-					Key:       req.Key,
-					Value:     req.Value,
-				}
-
-				if _, err := l.activeSegment.Append(rec); err != nil {
-					req.ResultChan <- ProduceResult{Err: err}
-					continue
-				}
-
-				req.ResultChan <- ProduceResult{Offset: offset, Err: nil}
 			}
 
 			// Force a single syscall for the whole batch

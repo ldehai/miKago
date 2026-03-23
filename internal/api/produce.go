@@ -128,17 +128,28 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 				// Here we just fetch the next offset artificially
 				baseOffset = partition.NextOffset()
 			} else {
-				// Legacy Standalone Logic
+				// Standalone Logic — batch append for performance
 				messages := parseMessageSet(recordSet)
-				for idx, msg := range messages {
-					off := partition.Append(msg.key, msg.value)
-					if idx == 0 {
-						baseOffset = off
+				if len(messages) > 0 {
+					keys := make([][]byte, len(messages))
+					vals := make([][]byte, len(messages))
+					for idx, msg := range messages {
+						keys[idx] = msg.key
+						vals[idx] = msg.value
 					}
-				}
-
-				if len(messages) == 0 {
-					baseOffset = partition.Append(nil, recordSet)
+					var err error
+					baseOffset, err = partition.AppendBatch(keys, vals)
+					if err != nil {
+						pResults = append(pResults, partitionResult{
+							partition:  partitionID,
+							errCode:    protocol.ErrUnknownServerError,
+							baseOffset: -1,
+							appendTime: -1,
+						})
+						continue
+					}
+				} else {
+					baseOffset, _ = partition.AppendBatch([][]byte{nil}, [][]byte{recordSet})
 				}
 			}
 

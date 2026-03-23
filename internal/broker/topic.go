@@ -58,8 +58,9 @@ func (p *Partition) ID() int32 {
 }
 
 // Append adds a message to the partition and returns the assigned offset.
-// Internal Log maintains its own locking via RingBuffer.
 func (p *Partition) Append(key, value []byte) int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	offset, err := p.log.Append(key, value)
 	if err != nil {
@@ -67,6 +68,11 @@ func (p *Partition) Append(key, value []byte) int64 {
 		panic(fmt.Sprintf("failed to append to partition %d: %v", p.id, err))
 	}
 	return offset
+}
+
+// AppendBatch adds multiple messages to the partition at once and returns the base offset.
+func (p *Partition) AppendBatch(keys, values [][]byte) (int64, error) {
+	return p.log.AppendBatch(keys, values)
 }
 
 // Fetch retrieves messages starting from the given offset, up to maxBytes of data.
