@@ -78,7 +78,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
-	log.Printf("[miKago] New connection from %s", remoteAddr)
+	log.Printf("[miKago] New connection from %s", conn.RemoteAddr())
 
 	for {
 		select {

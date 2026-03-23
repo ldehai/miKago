@@ -2,7 +2,6 @@ package api
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/protocol"
@@ -29,8 +28,7 @@ func (h *Handler) HandleRequest(data []byte) (protocol.Payload, error) {
 		return nil, fmt.Errorf("decoding request header: %w", err)
 	}
 
-	log.Printf("[miKago] Request: api_key=%d, api_version=%d, correlation_id=%d, client_id=%v",
-		header.APIKey, header.APIVersion, header.CorrelationID, header.ClientID)
+	// Log detauls removed for performance, keep only crucial errors below.
 
 	var respPayload protocol.Payload
 
@@ -63,7 +61,6 @@ func (h *Handler) HandleRequest(data []byte) (protocol.Payload, error) {
 		respPayload, err = HandleFindCoordinator(header, decoder, h.Broker)
 
 	default:
-		log.Printf("[miKago] Unsupported API key: %d", header.APIKey)
 		return h.unsupportedAPIResponse(header), nil
 	}
 

@@ -58,9 +58,8 @@ func (p *Partition) ID() int32 {
 }
 
 // Append adds a message to the partition and returns the assigned offset.
+// Internal Log maintains its own locking via RingBuffer.
 func (p *Partition) Append(key, value []byte) int64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	offset, err := p.log.Append(key, value)
 	if err != nil {

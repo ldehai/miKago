@@ -26,6 +26,8 @@ type Log struct {
 	activeSegment   *Segment
 	maxSegmentBytes int64
 	stopCh          chan struct{}
+	ringBuffer      *RingBuffer
+	writerWG        sync.WaitGroup
 }
 
 // NewLog creates or opens a log in the given directory.
@@ -57,6 +59,9 @@ func NewLogWithConfig(dir string, maxSegmentBytes int64) (*Log, error) {
 		l.segments = append(l.segments, seg)
 		l.activeSegment = seg
 	}
+
+	l.ringBuffer = NewRingBuffer(4096)
+	l.startWriter()
 
 	return l, nil
 }
@@ -164,30 +169,67 @@ func (l *Log) recover() error {
 	return nil
 }
 
-// Append adds a message to the log. Returns the assigned offset.
+// Append adds a message to the log by pushing it to a ring buffer and waiting for batch result.
 func (l *Log) Append(key, value []byte) (int64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	resChan := make(chan ProduceResult, 1)
+	req := &ProduceRequest{
+		Key:        key,
+		Value:      value,
+		ResultChan: resChan,
+	}
 
-	if l.activeSegment.Size() >= l.maxSegmentBytes {
-		if err := l.rollSegment(); err != nil {
-			return 0, fmt.Errorf("roll segment: %w", err)
+	if !l.ringBuffer.Push(req) {
+		return 0, fmt.Errorf("partition log is closing or buffer is full")
+	}
+
+	res := <-resChan
+	return res.Offset, res.Err
+}
+
+// Internal implementation removed in favor of batch processing in startWriter.
+
+func (l *Log) startWriter() {
+	l.writerWG.Add(1)
+	go func() {
+		defer l.writerWG.Done()
+		for {
+			batch := l.ringBuffer.PopBatch(4096)
+			if batch == nil {
+				return
+			}
+
+			// Single lock for the entire batch to reduce contention
+			l.mu.Lock()
+			for _, req := range batch {
+				// Roll segment if full
+				if l.activeSegment.Size() >= l.maxSegmentBytes {
+					if err := l.rollSegment(); err != nil {
+						req.ResultChan <- ProduceResult{Err: err}
+						continue
+					}
+				}
+
+				offset := l.activeSegment.NextOffset()
+				rec := &Record{
+					Offset:    offset,
+					Timestamp: time.Now(),
+					Key:       req.Key,
+					Value:     req.Value,
+				}
+
+				if _, err := l.activeSegment.Append(rec); err != nil {
+					req.ResultChan <- ProduceResult{Err: err}
+					continue
+				}
+
+				req.ResultChan <- ProduceResult{Offset: offset, Err: nil}
+			}
+
+			// Force a single syscall for the whole batch
+			l.activeSegment.Flush()
+			l.mu.Unlock()
 		}
-	}
-
-	offset := l.activeSegment.NextOffset()
-	rec := &Record{
-		Offset:    offset,
-		Timestamp: time.Now(),
-		Key:       key,
-		Value:     value,
-	}
-
-	if _, err := l.activeSegment.Append(rec); err != nil {
-		return 0, err
-	}
-
-	return offset, nil
+	}()
 }
 
 func (l *Log) rollSegment() error {
@@ -321,11 +363,18 @@ func (l *Log) HighWaterMark() int64 {
 	return l.activeSegment.NextOffset()
 }
 
-// Flush syncs all segments to disk.
+// Flush pushes memory-buffered data to the operating system's page cache.
 func (l *Log) Flush() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.activeSegment.Flush()
+}
+
+// Sync forces the operating system to flush all data to the physical disk.
+func (l *Log) Sync() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.activeSegment.Sync()
 }
 
 // Close closes all segments and stops the retention cleaner.
@@ -335,6 +384,13 @@ func (l *Log) Close() error {
 	default:
 		close(l.stopCh)
 	}
+
+	l.mu.Lock()
+	l.ringBuffer.Close()
+	l.mu.Unlock()
+
+	// Wait for the background writer to finish processing all pending messages.
+	l.writerWG.Wait()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

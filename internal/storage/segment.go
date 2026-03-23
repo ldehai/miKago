@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -29,6 +30,7 @@ type Segment struct {
 	recordCount   int       // number of records since last index entry
 	dir           string    // directory path
 	lastTimestamp time.Time // timestamp of the last record written
+	logWriter     *bufio.Writer // buffered writer for log file
 }
 
 // segmentFileName generates the 20-digit zero-padded filename for a segment.
@@ -78,6 +80,7 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 		logSize:    logStat.Size(),
 		indexCount: int(indexStat.Size() / IndexEntrySize),
 		dir:        dir,
+		logWriter:  bufio.NewWriterSize(logFile, 64*1024),
 	}
 
 	return s, nil
@@ -125,15 +128,15 @@ func (s *Segment) Recover() error {
 func (s *Segment) Append(rec *Record) (int64, error) {
 	position := s.logSize
 
-	// Write index entry if needed (sparse index)
+	// Write index entry every N records
 	if s.recordCount%IndexInterval == 0 {
 		if err := s.writeIndexEntry(int32(rec.Offset-s.baseOffset), int32(position)); err != nil {
 			return 0, err
 		}
 	}
 
-	// Write record to log
-	if err := EncodeRecord(s.logFile, rec); err != nil {
+	// Write record to bufio.Writer instead of file directly
+	if err := EncodeRecord(s.logWriter, rec); err != nil {
 		return 0, fmt.Errorf("append record: %w", err)
 	}
 
@@ -279,8 +282,13 @@ func (s *Segment) Size() int64 {
 	return s.logSize
 }
 
-// Flush syncs both files to disk.
+// Flush pushes memory-buffered data to the operating system's page cache.
 func (s *Segment) Flush() error {
+	return s.logWriter.Flush()
+}
+
+// Sync forces the operating system to flush all data to the physical disk.
+func (s *Segment) Sync() error {
 	if err := s.logFile.Sync(); err != nil {
 		return err
 	}
@@ -289,6 +297,7 @@ func (s *Segment) Flush() error {
 
 // Close closes both file handles.
 func (s *Segment) Close() error {
+	s.Sync() // Final sync before close
 	if err := s.logFile.Close(); err != nil {
 		return err
 	}
