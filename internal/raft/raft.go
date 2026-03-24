@@ -70,6 +70,7 @@ type Raft struct {
 	currentLeaderID string                 // ID of the current known leader (self if leader)
 	peerLastSeen    map[string]time.Time   // last successful heartbeat response time per peer
 	OnLeaderChange  OnLeaderChangeFn       // callback when leadership changes (may be nil)
+	leaderReadyCh   chan struct{}           // closed by runLeader() once the heartbeat loop starts
 }
 
 // ApplyMsg represents a committed message to be applied to the state machine.
@@ -203,8 +204,14 @@ func (r *Raft) runCandidate() {
 }
 
 func (r *Raft) runLeader() {
-	// Start sending heartbeats immediately
-	r.heartbeatTimer = time.NewTimer(0) // Fire instantly for the first time
+	// Signal that the heartbeat loop is now running. Callers waiting on
+	// WaitLeaderReady() (e.g. the partition assignment goroutine) unblock here.
+	r.mu.Lock()
+	ch := r.leaderReadyCh
+	r.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
 
 	for r.state == Leader {
 		<-r.heartbeatTimer.C
@@ -348,9 +355,34 @@ func (r *Raft) becomeLeader() {
 		r.matchIndex[peer.ID] = 0
 	}
 
+	// Initialize heartbeatTimer here so Propose() can safely use it
+	// before runLeader() has had a chance to start.
+	r.heartbeatTimer = time.NewTimer(0)
+
+	// leaderReadyCh is closed by runLeader() once the heartbeat loop is running.
+	// Callers that need to wait for the loop to be live use WaitLeaderReady().
+	r.leaderReadyCh = make(chan struct{})
+
 	if r.OnLeaderChange != nil {
 		cb := r.OnLeaderChange
 		go cb(true)
+	}
+}
+
+// WaitLeaderReady blocks until runLeader() has started its heartbeat loop,
+// or the timeout elapses. Returns false on timeout.
+func (r *Raft) WaitLeaderReady(timeout time.Duration) bool {
+	r.mu.Lock()
+	ch := r.leaderReadyCh
+	r.mu.Unlock()
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 

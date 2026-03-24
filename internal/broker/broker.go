@@ -109,11 +109,14 @@ func (b *Broker) onRaftLeaderChange(isLeader bool) {
 	if !isLeader {
 		return
 	}
-	log.Printf("[Broker %d] Became Raft leader (Controller). Waiting for peer health data...", b.Config.BrokerID)
+	log.Printf("[Broker %d] Became Raft leader (Controller). Waiting for heartbeat loop...", b.Config.BrokerID)
 
-	// Wait for a few heartbeat rounds so peerLastSeen is populated.
-	// Raft heartbeat interval is 50ms; 200ms gives ~4 rounds.
-	time.Sleep(200 * time.Millisecond)
+	// Block until runLeader() has started its heartbeat loop (heartbeatTimer is live).
+	// This replaces the old time.Sleep(200ms) with an explicit synchronization point.
+	if !b.Raft.WaitLeaderReady(500 * time.Millisecond) {
+		log.Printf("[Broker %d] Timed out waiting for leader ready; skipping partition assignment", b.Config.BrokerID)
+		return
+	}
 
 	b.assignPartitionLeaders()
 }
