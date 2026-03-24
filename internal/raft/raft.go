@@ -9,6 +9,36 @@ import (
 	"github.com/andy/mikago/internal/metrics"
 )
 
+// SetAdminAddr stores this node's admin HTTP URL so it can be gossiped to peers
+// via Raft heartbeats. Call this before the node starts sending RPCs.
+func (r *Raft) SetAdminAddr(addr string) {
+	r.mu.Lock()
+	r.localAdminAddr = addr
+	r.mu.Unlock()
+}
+
+// PeerAdminAddrs returns a snapshot of all discovered peer admin URLs
+// (nodeID → "http://host:port"). Updated within ~2 heartbeat cycles of startup.
+func (r *Raft) PeerAdminAddrs() map[string]string {
+	r.peerAdminMu.RLock()
+	defer r.peerAdminMu.RUnlock()
+	out := make(map[string]string, len(r.peerAdminAddrs))
+	for k, v := range r.peerAdminAddrs {
+		out[k] = v
+	}
+	return out
+}
+
+// recordPeerAdmin stores a discovered peer admin URL. Safe to call concurrently.
+func (r *Raft) recordPeerAdmin(nodeID, addr string) {
+	if addr == "" || nodeID == r.ID {
+		return
+	}
+	r.peerAdminMu.Lock()
+	r.peerAdminAddrs[nodeID] = addr
+	r.peerAdminMu.Unlock()
+}
+
 // OnLeaderChangeFn is called when this node's leadership status changes.
 // isLeader=true means this node just became the Raft leader (Controller).
 // Called in a separate goroutine, safe to block.
@@ -74,6 +104,11 @@ type Raft struct {
 	OnLeaderChange  OnLeaderChangeFn       // callback when leadership changes (may be nil)
 	leaderReadyCh   chan struct{}           // closed by runLeader() once the heartbeat loop starts
 
+	// Admin auto-discovery via heartbeat gossip
+	localAdminAddr string            // this node's admin HTTP URL (set by SetAdminAddr)
+	peerAdminAddrs map[string]string // nodeID → admin URL, populated from RPC gossip
+	peerAdminMu    sync.RWMutex      // protects peerAdminAddrs only
+
 	done chan struct{} // closed by Stop() to terminate the run loop
 }
 
@@ -104,9 +139,10 @@ func NewRaft(id string, peers []Peer) *Raft {
 		lastApplied:  0,
 		nextIndex:    make(map[string]int),
 		matchIndex:   make(map[string]int),
-		ApplyCh:      make(chan ApplyMsg, 100),
-		peerLastSeen: make(map[string]time.Time),
-		done:         make(chan struct{}),
+		ApplyCh:        make(chan ApplyMsg, 100),
+		peerLastSeen:   make(map[string]time.Time),
+		peerAdminAddrs: make(map[string]string),
+		done:           make(chan struct{}),
 	}
 
 	// Start the election timer (random duration between 150ms and 300ms)
@@ -178,12 +214,17 @@ func (r *Raft) runCandidate() {
 	lastLogTerm := r.getLastLogTerm()
 	r.mu.Unlock()
 
+	r.mu.Lock()
+	localAdmin := r.localAdminAddr
+	r.mu.Unlock()
+
 	// Send RequestVote to all peers
 	args := RequestVoteArgs{
 		Term:         term,
 		CandidateID:  r.ID,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
+		AdminAddr:    localAdmin,
 	}
 
 	votes := 1 // We vote for ourselves
@@ -276,18 +317,31 @@ func (r *Raft) runLeader() {
 					entries = r.log[r.nextIndex[p.ID]:]
 				}
 
+				// Snapshot known peer admin addrs to broadcast (read under peerAdminMu).
+				r.peerAdminMu.RLock()
+				knownAdminAddrs := make(map[string]string, len(r.peerAdminAddrs))
+				for k, v := range r.peerAdminAddrs {
+					knownAdminAddrs[k] = v
+				}
+				r.peerAdminMu.RUnlock()
+
 				args := AppendEntriesArgs{
-					Term:         term,
-					LeaderID:     r.ID,
-					PrevLogIndex: prevLogIndex,
-					PrevLogTerm:  prevLogTerm,
-					Entries:      entries,
-					LeaderCommit: leaderCommit,
+					Term:           term,
+					LeaderID:       r.ID,
+					PrevLogIndex:   prevLogIndex,
+					PrevLogTerm:    prevLogTerm,
+					Entries:        entries,
+					LeaderCommit:   leaderCommit,
+					AdminAddr:      r.localAdminAddr,
+					PeerAdminAddrs: knownAdminAddrs,
 				}
 				r.mu.Unlock()
 
 				var reply AppendEntriesReply
 				if SendAppendEntries(&p, &args, &reply) {
+					// Record the follower's admin addr from the reply (outside main lock).
+					r.recordPeerAdmin(p.ID, reply.AdminAddr)
+
 					r.mu.Lock()
 					defer r.mu.Unlock()
 

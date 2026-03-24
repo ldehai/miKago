@@ -38,6 +38,7 @@ type Config struct {
 	DefaultNumPartitions int32 // default number of partitions for auto-created topics
 	RaftPort             int32
 	RaftPeers            []raft.Peer
+	AdminPort            int32 // admin HTTP port; used to advertise admin URL to Raft peers
 	// KnownBrokers lists all brokers in the cluster (including self) for metadata and
 	// partition leader assignment. If empty, only self is known.
 	KnownBrokers []ClusterBroker
@@ -98,6 +99,12 @@ func NewBroker(cfg Config) *Broker {
 	if b.Raft != nil {
 		b.Raft.OnLeaderChange = b.onRaftLeaderChange
 		go b.runStateMachine()
+
+		// Advertise this node's admin URL to peers via Raft heartbeat gossip.
+		// Use cfg.Host so remote nodes get a routable address.
+		if cfg.AdminPort > 0 {
+			b.Raft.SetAdminAddr(fmt.Sprintf("http://%s:%d", cfg.Host, cfg.AdminPort))
+		}
 	}
 
 	return b

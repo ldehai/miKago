@@ -21,6 +21,7 @@ type RequestVoteArgs struct {
 	CandidateID  string // Candidate requesting vote
 	LastLogIndex int    // Index of candidate's last log entry
 	LastLogTerm  int    // Term of candidate's last log entry
+	AdminAddr    string // Candidate's admin HTTP URL (for auto-discovery)
 }
 
 // RequestVoteReply contains the reply for a RequestVote RPC.
@@ -42,16 +43,21 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int        // Term of prevLogIndex entry
 	Entries      []LogEntry // Log entries to store (empty for heartbeat)
 	LeaderCommit int        // Leader's commitIndex
+	// Admin auto-discovery: leader propagates all known admin addrs each heartbeat.
+	AdminAddr      string            // Leader's own admin HTTP URL
+	PeerAdminAddrs map[string]string // All known nodeID → admin URL (gossip)
 }
 
 // AppendEntriesReply contains the reply for an AppendEntries RPC.
 type AppendEntriesReply struct {
 	Term    int  // Current term, for leader to update itself
 	Success bool // True if follower contained entry matching prevLogIndex and prevLogTerm
-	
+
 	// Fast backup (optimizations to avoid backtracking 1 by 1)
 	ConflictTerm  int // The conflicting term
 	ConflictIndex int // The first index it stores for the conflicting term
+
+	AdminAddr string // Follower's own admin HTTP URL (returned to leader for discovery)
 }
 
 func (args *AppendEntriesArgs) String() string {

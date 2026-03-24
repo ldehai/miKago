@@ -16,6 +16,9 @@ type RaftRPCWrapper struct {
 }
 
 func (rw *RaftRPCWrapper) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
+	// Record the candidate's admin addr before acquiring the main lock.
+	rw.rf.recordPeerAdmin(args.CandidateID, args.AdminAddr)
+
 	rw.rf.mu.Lock()
 	defer rw.rf.mu.Unlock()
 
@@ -64,8 +67,17 @@ func (rw *RaftRPCWrapper) RequestVote(args *RequestVoteArgs, reply *RequestVoteR
 }
 
 func (rw *RaftRPCWrapper) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
+	// Gossip: record leader's admin addr and all known peer addrs (uses peerAdminMu, not main lock).
+	rw.rf.recordPeerAdmin(args.LeaderID, args.AdminAddr)
+	for nodeID, addr := range args.PeerAdminAddrs {
+		rw.rf.recordPeerAdmin(nodeID, addr)
+	}
+
 	rw.rf.mu.Lock()
 	defer rw.rf.mu.Unlock()
+
+	// Echo back our own admin addr so the leader can discover us.
+	reply.AdminAddr = rw.rf.localAdminAddr
 
 	// Handle term checking and stepping down if needed
 	if args.Term < rw.rf.currentTerm {

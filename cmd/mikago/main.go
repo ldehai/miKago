@@ -99,6 +99,7 @@ func main() {
 		RaftPort:        int32(*raftPort),
 		RaftPeers:       peers,
 		KnownBrokers:    knownBrokers,
+		AdminPort:       int32(*adminPort),
 	}
 
 	// Build optional TLS config

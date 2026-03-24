@@ -166,11 +166,34 @@ func (s *Server) handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 	_ = enc.Encode(resp)
 }
 
+// resolvedPeerURLs returns the peer admin URLs to query, merging Raft auto-discovered
+// addrs (preferred) with the statically configured peerURLs (fallback).
+func (s *Server) resolvedPeerURLs() []string {
+	seen := make(map[string]bool)
+	var urls []string
+	if s.broker.Raft != nil {
+		for _, url := range s.broker.Raft.PeerAdminAddrs() {
+			if !seen[url] {
+				seen[url] = true
+				urls = append(urls, url)
+			}
+		}
+	}
+	for _, url := range s.peerURLs { // static fallback from --cluster-admin
+		if !seen[url] {
+			seen[url] = true
+			urls = append(urls, url)
+		}
+	}
+	return urls
+}
+
 // handleCluster fans out to all known admin peers concurrently and returns a
 // unified cluster snapshot. This is what the multi-broker dashboard polls.
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	selfMetrics := s.buildAPIResponse()
-	entries := make([]brokerEntry, 0, 1+len(s.peerURLs))
+	peerURLs := s.resolvedPeerURLs()
+	entries := make([]brokerEntry, 0, 1+len(peerURLs))
 
 	// Self entry (always online, no HTTP round-trip needed)
 	entries = append(entries, brokerEntry{
@@ -181,10 +204,10 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Fan out to peers concurrently
-	if len(s.peerURLs) > 0 {
+	if len(peerURLs) > 0 {
 		var mu sync.Mutex
 		var wg sync.WaitGroup
-		for _, u := range s.peerURLs {
+		for _, u := range peerURLs {
 			wg.Add(1)
 			go func(url string) {
 				defer wg.Done()
