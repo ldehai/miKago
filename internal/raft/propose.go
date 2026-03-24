@@ -18,8 +18,12 @@ func (r *Raft) Propose(command interface{}) (int, int, bool) {
 		Command: command,
 	})
 
-	// Inform everyone about the new entry immediately
-	r.heartbeatTimer.Reset(0)
+	// Trigger an immediate heartbeat to replicate the new entry quickly.
+	// Guard against nil: heartbeatTimer is initialized in runLeader(), which may
+	// not have started yet when Propose() is first called right after election.
+	if r.heartbeatTimer != nil {
+		r.heartbeatTimer.Reset(0)
+	}
 
 	return index, term, true
 }
