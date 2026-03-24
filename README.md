@@ -182,11 +182,43 @@ curl -s http://localhost:8080/api/metrics | jq .
 
 </details>
 
-### Admin Port Flags
+### Cluster-wide Dashboard
+
+When running a multi-broker cluster, pass each node's admin URL to its peers with `--cluster-admin`. Any broker's Dashboard will then show **all nodes in one view** — node status tabs, a per-node summary strip, and detailed charts for any selected node.
+
+```bash
+# Node 0 — knows about nodes 1 and 2
+./mikago -broker-id 0 -port 9090 -admin-port 9180 \
+  --cluster-admin http://host1:9181,http://host2:9182
+
+# Node 1 — knows about nodes 0 and 2
+./mikago -broker-id 1 -port 9091 -admin-port 9181 \
+  --cluster-admin http://host0:9180,http://host2:9182
+
+# Node 2 — knows about nodes 0 and 1
+./mikago -broker-id 2 -port 9092 -admin-port 9182 \
+  --cluster-admin http://host0:9180,http://host1:9181
+```
+
+Open **any one** of `http://host0:9180`, `http://host1:9181`, or `http://host2:9182` — the dashboard automatically fetches and aggregates all peers every 2 seconds via the `/api/cluster` endpoint.
+
+**What the cluster dashboard shows:**
+- **Node tabs** — click to switch the detail view to any broker; offline nodes are greyed out
+- **Cluster Nodes strip** — status card per node (online/offline, connections, topics, Raft term)
+- **Detail section** — request rate / throughput / latency charts, partition table, and consumer group lag for the selected node
+
+The `/api/cluster` endpoint itself is also queryable directly:
+
+```bash
+curl -s http://localhost:9180/api/cluster | jq '.[].broker_id, .[].online'
+```
+
+### Admin Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--admin-port` | `8080` | HTTP port for Dashboard, `/metrics`, and `/api/metrics`. Set to `0` to disable. |
+| `--cluster-admin` | _(empty)_ | Comma-separated admin URLs of peer brokers (e.g. `http://host1:8081,http://host2:8082`). Enables the multi-broker cluster view. |
 
 The admin port is completely independent of the Kafka protocol port and adds no overhead to the message hot path — all metric writes are single atomic operations.
 
@@ -216,15 +248,23 @@ Open **http://localhost:8080** in your browser to see the live dashboard.
 ### 3. Spin Up a 3-Node Distributed Cluster
 Start three separate broker processes pointing to each other via internal Raft RPC ports:
 ```bash
-# Node 1 — dashboard on :9181
-./mikago -broker-id 1 -port 9091 -admin-port 9181 -data-dir ./data1 -raft-port 8001 -peers "2@localhost:8002,3@localhost:8003"
-# Node 2 — dashboard on :9182
-./mikago -broker-id 2 -port 9092 -admin-port 9182 -data-dir ./data2 -raft-port 8002 -peers "1@localhost:8001,3@localhost:8003"
-# Node 3 — dashboard on :9183
-./mikago -broker-id 3 -port 9093 -admin-port 9183 -data-dir ./data3 -raft-port 8003 -peers "1@localhost:8001,2@localhost:8002"
+# Node 1 — dashboard on :9181, sees peers :9182 and :9183
+./mikago -broker-id 1 -port 9091 -admin-port 9181 -data-dir ./data1 \
+  -raft-port 8001 -peers "2@localhost:8002,3@localhost:8003" \
+  -cluster-admin "http://localhost:9182,http://localhost:9183"
+
+# Node 2 — dashboard on :9182, sees peers :9181 and :9183
+./mikago -broker-id 2 -port 9092 -admin-port 9182 -data-dir ./data2 \
+  -raft-port 8002 -peers "1@localhost:8001,3@localhost:8003" \
+  -cluster-admin "http://localhost:9181,http://localhost:9183"
+
+# Node 3 — dashboard on :9183, sees peers :9181 and :9182
+./mikago -broker-id 3 -port 9093 -admin-port 9183 -data-dir ./data3 \
+  -raft-port 8003 -peers "1@localhost:8001,2@localhost:8002" \
+  -cluster-admin "http://localhost:9181,http://localhost:9182"
 ```
 
-Each node has its own dashboard. Visit any of http://localhost:9181, :9182, or :9183 to inspect per-node metrics.
+Open **any one** of http://localhost:9181, :9182, or :9183 — the dashboard shows all 3 nodes together with node selector tabs and live status indicators.
 
 ---
 

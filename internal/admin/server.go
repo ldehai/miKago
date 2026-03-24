@@ -1,5 +1,6 @@
 // Package admin provides an HTTP admin interface with a built-in Web Dashboard,
-// a Prometheus-compatible /metrics endpoint, and a JSON /api/metrics endpoint.
+// a Prometheus-compatible /metrics endpoint, and JSON metrics endpoints.
+// When --cluster-admin peers are configured, the dashboard aggregates all brokers.
 package admin
 
 import (
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/andy/mikago/internal/broker"
@@ -72,20 +74,40 @@ type groupInfo struct {
 	Lag             int64  `json:"lag"`
 }
 
+// brokerEntry is one node's entry in the cluster response.
+type brokerEntry struct {
+	BrokerID int32        `json:"broker_id"`
+	AdminURL string       `json:"admin_url"`
+	Online   bool         `json:"online"`
+	Error    string       `json:"error,omitempty"`
+	Metrics  *apiResponse `json:"metrics,omitempty"`
+}
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 // Server is the HTTP admin server. It is completely independent of the Kafka
-// protocol port and adds zero overhead to the hot path.
+// protocol port and adds zero overhead to the message hot path.
 type Server struct {
-	addr    string
-	store   *metrics.Store
-	broker  *broker.Broker
-	httpSrv *http.Server
+	addr       string
+	store      *metrics.Store
+	broker     *broker.Broker
+	peerURLs   []string     // other brokers' admin base URLs e.g. "http://host:8081"
+	httpClient *http.Client // used to fan-out to peer admin endpoints
+	httpSrv    *http.Server
 }
 
-// New creates an admin Server.
-func New(addr string, store *metrics.Store, b *broker.Broker) *Server {
-	return &Server{addr: addr, store: store, broker: b}
+// New creates an admin Server. Pass peer admin base-URLs (e.g. "http://host:8081")
+// to enable the cluster-wide dashboard; pass nil for single-node mode.
+func New(addr string, store *metrics.Store, b *broker.Broker, peerURLs []string) *Server {
+	return &Server{
+		addr:     addr,
+		store:    store,
+		broker:   b,
+		peerURLs: peerURLs,
+		httpClient: &http.Client{
+			Timeout: 2 * time.Second,
+		},
+	}
 }
 
 // Start registers handlers and begins serving. It returns immediately;
@@ -95,6 +117,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/metrics", s.handlePrometheus)
 	mux.HandleFunc("/api/metrics", s.handleAPIMetrics)
+	mux.HandleFunc("/api/cluster", s.handleCluster)
 
 	s.httpSrv = &http.Server{Addr: s.addr, Handler: mux}
 
@@ -102,6 +125,9 @@ func (s *Server) Start(ctx context.Context) {
 		log.Printf("[admin] Dashboard  → http://localhost:%s/", portOf(s.addr))
 		log.Printf("[admin] Prometheus → http://localhost:%s/metrics", portOf(s.addr))
 		log.Printf("[admin] JSON API   → http://localhost:%s/api/metrics", portOf(s.addr))
+		if len(s.peerURLs) > 0 {
+			log.Printf("[admin] Cluster    → http://localhost:%s/api/cluster  (%d peer(s))", portOf(s.addr), len(s.peerURLs))
+		}
 		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[admin] HTTP server error: %v", err)
 		}
@@ -138,6 +164,64 @@ func (s *Server) handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(resp)
+}
+
+// handleCluster fans out to all known admin peers concurrently and returns a
+// unified cluster snapshot. This is what the multi-broker dashboard polls.
+func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
+	selfMetrics := s.buildAPIResponse()
+	entries := make([]brokerEntry, 0, 1+len(s.peerURLs))
+
+	// Self entry (always online, no HTTP round-trip needed)
+	entries = append(entries, brokerEntry{
+		BrokerID: s.broker.Config.BrokerID,
+		AdminURL: fmt.Sprintf("http://localhost:%s", portOf(s.addr)),
+		Online:   true,
+		Metrics:  &selfMetrics,
+	})
+
+	// Fan out to peers concurrently
+	if len(s.peerURLs) > 0 {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, u := range s.peerURLs {
+			wg.Add(1)
+			go func(url string) {
+				defer wg.Done()
+				entry := brokerEntry{AdminURL: url}
+				resp, err := s.httpClient.Get(url + "/api/metrics")
+				if err != nil {
+					entry.Error = err.Error()
+					mu.Lock()
+					entries = append(entries, entry)
+					mu.Unlock()
+					return
+				}
+				defer resp.Body.Close()
+				var m apiResponse
+				if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+					entry.Error = "decode error: " + err.Error()
+				} else {
+					entry.Online = true
+					entry.BrokerID = m.BrokerID
+					entry.Metrics = &m
+				}
+				mu.Lock()
+				entries = append(entries, entry)
+				mu.Unlock()
+			}(u)
+		}
+		wg.Wait()
+	}
+
+	// Sort by broker ID for stable ordering
+	sort.Slice(entries, func(i, j int) bool { return entries[i].BrokerID < entries[j].BrokerID })
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(entries)
 }
 
 // buildAPIResponse assembles a full metrics response from the metrics store and broker state.
@@ -194,12 +278,15 @@ func (s *Server) buildAPIResponse() apiResponse {
 
 	// Consumer groups + lag
 	allOffsets := s.broker.GroupManager.AllGroupOffsets()
-	type gKey struct{ group, topic string; partition int32 }
+	type gKey struct {
+		group, topic string
+		partition    int32
+	}
 	type gEntry struct {
 		k               gKey
 		committed, hwm  int64
 	}
-	var entries []gEntry
+	var gEntries []gEntry
 	for groupID, topics := range allOffsets {
 		for topicName, partitions := range topics {
 			for partID, committed := range partitions {
@@ -208,7 +295,7 @@ func (s *Server) buildAPIResponse() apiResponse {
 				if t != nil && int(partID) < len(t.Partitions) {
 					hwm = t.Partitions[partID].HighWaterMark()
 				}
-				entries = append(entries, gEntry{
+				gEntries = append(gEntries, gEntry{
 					k:         gKey{groupID, topicName, partID},
 					committed: committed,
 					hwm:       hwm,
@@ -216,16 +303,17 @@ func (s *Server) buildAPIResponse() apiResponse {
 			}
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].k.group != entries[j].k.group {
-			return entries[i].k.group < entries[j].k.group
+	sort.Slice(gEntries, func(i, j int) bool {
+		a, b := gEntries[i].k, gEntries[j].k
+		if a.group != b.group {
+			return a.group < b.group
 		}
-		if entries[i].k.topic != entries[j].k.topic {
-			return entries[i].k.topic < entries[j].k.topic
+		if a.topic != b.topic {
+			return a.topic < b.topic
 		}
-		return entries[i].k.partition < entries[j].k.partition
+		return a.partition < b.partition
 	})
-	for _, e := range entries {
+	for _, e := range gEntries {
 		lag := e.hwm - e.committed
 		if lag < 0 {
 			lag = 0
@@ -256,346 +344,350 @@ const dashboardHTML = `<!DOCTYPE html>
 :root{
   --bg:#0d1117;--surface:#161b22;--surface2:#21262d;
   --border:#30363d;--text:#c9d1d9;--muted:#8b949e;
-  --accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;
-  --purple:#bc8cff;
+  --accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff;
 }
 body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5}
-a{color:var(--accent);text-decoration:none}
-.header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;gap:16px}
-.header h1{font-size:18px;font-weight:600;color:var(--text)}
-.header .sub{font-size:12px;color:var(--muted);margin-top:2px}
-.logo{font-size:22px}
-.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px;box-shadow:0 0 6px var(--green)}
-.container{max-width:1400px;margin:0 auto;padding:20px 24px}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-bottom:24px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}
-.card .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
-.card .value{font-size:26px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
-.card .value.accent{color:var(--accent)}
-.card .value.green{color:var(--green)}
-.card .value.orange{color:var(--orange)}
-.charts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px}
-@media(max-width:900px){.charts{grid-template-columns:1fr}}
-.chart-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}
-.chart-box h3{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px}
+.header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;gap:12px}
+.header h1{font-size:17px;font-weight:600}
+.header .sub{font-size:11px;color:var(--muted);margin-top:1px}
+.refresh{margin-left:auto;font-size:11px;color:var(--muted)}
+.container{max-width:1440px;margin:0 auto;padding:18px 24px}
+
+/* broker tabs */
+.broker-bar{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
+.broker-tab{display:flex;align-items:center;gap:7px;padding:6px 14px;border-radius:20px;border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:12px;font-weight:500;transition:all .15s}
+.broker-tab:hover{border-color:var(--accent);color:var(--accent)}
+.broker-tab.active{background:rgba(88,166,255,.12);border-color:var(--accent);color:var(--accent)}
+.broker-tab.offline{opacity:.5;cursor:default}
+.broker-tab.offline:hover{border-color:var(--border);color:var(--text)}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.dot.on{background:var(--green);box-shadow:0 0 5px var(--green)}
+.dot.off{background:var(--red)}
+.broker-label{font-size:10px;color:var(--muted);margin-left:auto;padding-left:8px}
+
+/* cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
+.card .label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+.card .value{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
+.value.accent{color:var(--accent)}.value.green{color:var(--green)}.value.orange{color:var(--orange)}.value.purple{color:var(--purple)}
+
+/* cluster node summary strip */
+.cluster-strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-bottom:20px}
+.node-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+.node-card.offline{opacity:.55}
+.node-header{display:flex;align-items:center;gap:7px;font-weight:600;font-size:13px;margin-bottom:4px}
+.node-stat{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
+.node-stat span:last-child{color:var(--text);font-variant-numeric:tabular-nums}
+
+/* charts */
+.charts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:20px}
+@media(max-width:960px){.charts{grid-template-columns:1fr}}
+.chart-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px}
+.chart-box h3{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
 canvas{width:100%!important;display:block}
-.tables{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
-@media(max-width:900px){.tables{grid-template-columns:1fr}}
+
+/* tables */
+.tables{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:960px){.tables{grid-template-columns:1fr}}
 .table-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.table-box h3{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;padding:14px 16px;border-bottom:1px solid var(--border);background:var(--surface2)}
+.table-box h3{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;padding:12px 14px;border-bottom:1px solid var(--border);background:var(--surface2)}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;font-size:11px;color:var(--muted);font-weight:500;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface2)}
-td{padding:8px 12px;border-bottom:1px solid var(--border);font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)}
+th{text-align:left;font-size:11px;color:var(--muted);font-weight:500;padding:7px 12px;border-bottom:1px solid var(--border);background:var(--surface2)}
+td{padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px;font-variant-numeric:tabular-nums}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:var(--surface2)}
-.badge{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:600;letter-spacing:.3px}
+.badge{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:600}
 .badge.green{background:rgba(63,185,80,.15);color:var(--green)}
 .badge.orange{background:rgba(210,153,34,.15);color:var(--orange)}
 .badge.red{background:rgba(248,81,73,.15);color:var(--red)}
 .badge.blue{background:rgba(88,166,255,.15);color:var(--accent)}
-.empty{color:var(--muted);text-align:center;padding:20px!important}
-.refresh{margin-left:auto;font-size:11px;color:var(--muted)}
-#last-updated{font-weight:500;color:var(--text)}
+.empty{color:var(--muted);text-align:center;padding:18px!important}
+.section-title{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;margin-top:4px}
 </style>
 </head>
 <body>
 <div class="header">
-  <span class="logo">&#x26A1;</span>
+  <span style="font-size:20px">&#x26A1;</span>
   <div>
     <h1>miKago Admin</h1>
-    <div class="sub">Broker <span id="hdr-broker-id">--</span> &nbsp;|&nbsp; Kafka-compatible message broker</div>
+    <div class="sub" id="hdr-sub">Connecting...</div>
   </div>
-  <div class="refresh">Last updated: <span id="last-updated">--</span></div>
+  <div class="refresh">Updated: <span id="last-updated" style="color:var(--text);font-weight:500">--</span></div>
 </div>
 
 <div class="container">
-  <!-- Overview cards -->
+
+  <!-- Broker selector tabs (hidden when single broker) -->
+  <div class="broker-bar" id="broker-bar" style="display:none"></div>
+
+  <!-- Cluster node summary (hidden when single broker) -->
+  <div id="cluster-strip-wrap" style="display:none">
+    <div class="section-title">Cluster Nodes</div>
+    <div class="cluster-strip" id="cluster-strip"></div>
+  </div>
+
+  <!-- Overview cards (current broker) -->
   <div class="cards">
-    <div class="card">
-      <div class="label">Connections</div>
-      <div class="value accent" id="c-connections">--</div>
-    </div>
-    <div class="card">
-      <div class="label">Topics</div>
-      <div class="value" id="c-topics">--</div>
-    </div>
-    <div class="card">
-      <div class="label">Partitions</div>
-      <div class="value" id="c-partitions">--</div>
-    </div>
-    <div class="card">
-      <div class="label">Raft Term</div>
-      <div class="value green" id="c-raft-term">--</div>
-    </div>
-    <div class="card">
-      <div class="label">Elections</div>
-      <div class="value" id="c-elections">--</div>
-    </div>
-    <div class="card">
-      <div class="label">Produce req/s</div>
-      <div class="value accent" id="c-produce-rate">--</div>
-    </div>
-    <div class="card">
-      <div class="label">Fetch req/s</div>
-      <div class="value accent" id="c-fetch-rate">--</div>
-    </div>
-    <div class="card">
-      <div class="label">Throughput In</div>
-      <div class="value" id="c-bytes-in">--</div>
-    </div>
+    <div class="card"><div class="label">Connections</div><div class="value accent" id="c-conn">--</div></div>
+    <div class="card"><div class="label">Topics</div><div class="value" id="c-topics">--</div></div>
+    <div class="card"><div class="label">Partitions</div><div class="value" id="c-parts">--</div></div>
+    <div class="card"><div class="label">Raft Term</div><div class="value green" id="c-term">--</div></div>
+    <div class="card"><div class="label">Elections</div><div class="value purple" id="c-elect">--</div></div>
+    <div class="card"><div class="label">Produce req/s</div><div class="value accent" id="c-prate">--</div></div>
+    <div class="card"><div class="label">Fetch req/s</div><div class="value accent" id="c-frate">--</div></div>
+    <div class="card"><div class="label">Bytes In/s</div><div class="value" id="c-bin">--</div></div>
   </div>
 
   <!-- Charts -->
   <div class="charts">
-    <div class="chart-box">
-      <h3>Request Rate (req/s)</h3>
-      <canvas id="chart-requests" height="140"></canvas>
-    </div>
-    <div class="chart-box">
-      <h3>Throughput (bytes/s)</h3>
-      <canvas id="chart-bytes" height="140"></canvas>
-    </div>
-    <div class="chart-box">
-      <h3>Produce Latency (ms)</h3>
-      <canvas id="chart-latency" height="140"></canvas>
-    </div>
+    <div class="chart-box"><h3>Request Rate (req/s)</h3><canvas id="chart-requests" height="130"></canvas></div>
+    <div class="chart-box"><h3>Throughput (bytes/s)</h3><canvas id="chart-bytes" height="130"></canvas></div>
+    <div class="chart-box"><h3>Produce Latency (ms)</h3><canvas id="chart-latency" height="130"></canvas></div>
   </div>
 
   <!-- Tables -->
   <div class="tables">
     <div class="table-box">
       <h3>Partitions</h3>
-      <table>
-        <thead><tr>
-          <th>Topic</th><th>Part</th><th>Leader</th><th>HWM</th><th>Msgs In</th><th>Bytes In</th>
-        </tr></thead>
-        <tbody id="partition-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
-      </table>
+      <table><thead><tr><th>Topic</th><th>Part</th><th>Leader</th><th>HWM</th><th>Msgs In</th><th>Bytes In</th></tr></thead>
+      <tbody id="partition-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table>
     </div>
     <div class="table-box">
       <h3>Consumer Group Lag</h3>
-      <table>
-        <thead><tr>
-          <th>Group</th><th>Topic</th><th>Part</th><th>Committed</th><th>HWM</th><th>Lag</th>
-        </tr></thead>
-        <tbody id="group-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
-      </table>
+      <table><thead><tr><th>Group</th><th>Topic</th><th>Part</th><th>Committed</th><th>HWM</th><th>Lag</th></tr></thead>
+      <tbody id="group-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table>
     </div>
   </div>
-</div>
+
+</div><!-- /container -->
 
 <script>
 (function() {
-  var HIST = 60;
-  var INTERVAL = 2000;
+  var HIST = 60, INTERVAL = 2000;
+  function mkS() { var a=[]; for(var i=0;i<HIST;i++) a.push(0); return a; }
 
-  // Data series: each is an array of HIST floats (oldest first)
-  function mkSeries() { var a=[]; for(var i=0;i<HIST;i++) a.push(0); return a; }
-  var series = {
-    produceRate: mkSeries(), fetchRate: mkSeries(),
-    bytesIn: mkSeries(), bytesOut: mkSeries(),
-    p50: mkSeries(), p95: mkSeries(), p99: mkSeries()
-  };
+  // Per-broker history keyed by broker_id
+  var history = {};
+  function getHist(id) {
+    if (!history[id]) history[id] = {
+      pRate:mkS(), fRate:mkS(), bIn:mkS(), bOut:mkS(), p50:mkS(), p95:mkS(), p99:mkS(),
+      prev: null
+    };
+    return history[id];
+  }
 
-  var prev = null;
+  var selectedBroker = null; // null = auto (first online)
+  var lastTs = 0;
 
-  function push(arr, val) { arr.push(val); arr.shift(); }
+  function push(arr, v) { arr.push(v); arr.shift(); }
 
   function fmtNum(n) {
-    if (n >= 1e9) return (n/1e9).toFixed(1)+'G';
-    if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-    if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+    n = n||0;
+    if (n>=1e9) return (n/1e9).toFixed(1)+'G';
+    if (n>=1e6) return (n/1e6).toFixed(1)+'M';
+    if (n>=1e3) return (n/1e3).toFixed(1)+'K';
     return n.toFixed(0);
   }
   function fmtBytes(n) {
-    if (n >= 1073741824) return (n/1073741824).toFixed(1)+' GiB';
-    if (n >= 1048576) return (n/1048576).toFixed(1)+' MiB';
-    if (n >= 1024) return (n/1024).toFixed(1)+' KiB';
+    n=n||0;
+    if (n>=1073741824) return (n/1073741824).toFixed(1)+' GiB';
+    if (n>=1048576)    return (n/1048576).toFixed(1)+' MiB';
+    if (n>=1024)       return (n/1024).toFixed(1)+' KiB';
     return n+' B';
   }
+  function setText(id, v) { var e=document.getElementById(id); if(e) e.textContent=v; }
 
-  function setText(id, val) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = val;
-  }
-
-  // Draw a multi-series line chart on a canvas element.
-  // lines: [{data:[], color:'#hex', label:'name'}]
+  // ── Chart renderer ────────────────────────────────────────────────────────
   function drawChart(canvasId, lines) {
     var canvas = document.getElementById(canvasId);
     if (!canvas) return;
-    var dpr = window.devicePixelRatio || 1;
+    var dpr = window.devicePixelRatio||1;
     var rect = canvas.getBoundingClientRect();
-    var W = rect.width || 300, H = 140;
-    canvas.width = W * dpr; canvas.height = H * dpr;
+    var W = rect.width||300, H = parseInt(canvas.getAttribute('height'))||130;
+    canvas.width = W*dpr; canvas.height = H*dpr;
     var ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
-
-    var pad = {t:8, r:8, b:30, l:44};
-    var gW = W - pad.l - pad.r;
-    var gH = H - pad.t - pad.b;
-
-    // background
-    ctx.fillStyle = '#161b22';
-    ctx.fillRect(0, 0, W, H);
-
-    // find max
-    var maxV = 0.001;
-    lines.forEach(function(l) { l.data.forEach(function(v) { if(v>maxV) maxV=v; }); });
-
-    // grid
-    ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
-    for (var gi = 0; gi <= 4; gi++) {
-      var gy = pad.t + (gH/4)*gi;
-      ctx.beginPath(); ctx.moveTo(pad.l, gy); ctx.lineTo(pad.l+gW, gy); ctx.stroke();
-    }
-
-    // y-axis labels
-    ctx.fillStyle = '#8b949e'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
-    ctx.fillText(fmtNum(maxV), pad.l-3, pad.t+8);
-    ctx.fillText(fmtNum(maxV*0.5), pad.l-3, pad.t+gH/2+4);
-    ctx.fillText('0', pad.l-3, pad.t+gH+4);
-
-    // series lines + fill
-    lines.forEach(function(l) {
+    var pad={t:6,r:6,b:28,l:42};
+    var gW=W-pad.l-pad.r, gH=H-pad.t-pad.b;
+    ctx.fillStyle='#161b22'; ctx.fillRect(0,0,W,H);
+    var maxV=0.001;
+    lines.forEach(function(l){l.data.forEach(function(v){if(v>maxV)maxV=v;});});
+    ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
+    for(var gi=0;gi<=4;gi++){var gy=pad.t+(gH/4)*gi;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(pad.l+gW,gy);ctx.stroke();}
+    ctx.fillStyle='#8b949e'; ctx.font='9px monospace'; ctx.textAlign='right';
+    ctx.fillText(fmtNum(maxV),pad.l-3,pad.t+8);
+    ctx.fillText(fmtNum(maxV*0.5),pad.l-3,pad.t+gH/2+4);
+    ctx.fillText('0',pad.l-3,pad.t+gH+4);
+    lines.forEach(function(l){
       ctx.beginPath();
-      l.data.forEach(function(v, i) {
-        var x = pad.l + (gW/(HIST-1))*i;
-        var y = pad.t + gH - (v/maxV)*gH;
-        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      l.data.forEach(function(v,i){
+        var x=pad.l+(gW/(HIST-1))*i, y=pad.t+gH-(v/maxV)*gH;
+        if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
       });
-      ctx.strokeStyle = l.color; ctx.lineWidth = 1.5; ctx.stroke();
-
-      // fill under
-      ctx.lineTo(pad.l+gW, pad.t+gH);
-      ctx.lineTo(pad.l, pad.t+gH);
-      ctx.closePath();
-      ctx.globalAlpha = 0.06; ctx.fillStyle = l.color; ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.strokeStyle=l.color; ctx.lineWidth=1.5; ctx.stroke();
+      ctx.lineTo(pad.l+gW,pad.t+gH); ctx.lineTo(pad.l,pad.t+gH); ctx.closePath();
+      ctx.globalAlpha=0.07; ctx.fillStyle=l.color; ctx.fill(); ctx.globalAlpha=1;
     });
-
-    // legend at bottom
-    var lx = pad.l;
-    ctx.textAlign = 'left'; ctx.font = '10px sans-serif';
-    lines.forEach(function(l) {
-      ctx.fillStyle = l.color;
-      ctx.fillRect(lx, H-pad.b+10, 8, 8);
-      ctx.fillStyle = '#8b949e';
-      ctx.fillText(l.label, lx+11, H-pad.b+18);
-      lx += ctx.measureText(l.label).width + 24;
+    var lx=pad.l; ctx.textAlign='left'; ctx.font='10px sans-serif';
+    lines.forEach(function(l){
+      ctx.fillStyle=l.color; ctx.fillRect(lx,H-pad.b+8,7,7);
+      ctx.fillStyle='#8b949e'; ctx.fillText(l.label,lx+10,H-pad.b+16);
+      lx+=ctx.measureText(l.label).width+22;
     });
   }
 
-  function updateCards(data, dt) {
-    setText('hdr-broker-id', data.broker_id);
-    setText('c-connections', data.active_connections);
-    var topics = data.topics || [];
-    setText('c-topics', topics.length);
-    var parts = 0; topics.forEach(function(t){ parts += t.partitions.length; });
-    setText('c-partitions', parts);
-    setText('c-raft-term', data.raft_term || 'N/A');
-    setText('c-elections', data.raft_elections || 0);
+  // ── Broker tabs ───────────────────────────────────────────────────────────
+  function renderBrokerTabs(entries) {
+    var bar = document.getElementById('broker-bar');
+    if (entries.length <= 1) { bar.style.display='none'; return; }
+    bar.style.display='flex';
+    bar.innerHTML = '<span class="broker-label">Broker:</span>';
+    entries.forEach(function(e) {
+      var div = document.createElement('div');
+      div.className = 'broker-tab' + (e.online?'':' offline') + (selectedBroker===e.broker_id?' active':'');
+      div.innerHTML = '<span class="dot '+(e.online?'on':'off')+'"></span>Node '+e.broker_id;
+      if (e.online) {
+        div.onclick = function() { selectedBroker = e.broker_id; refresh(); };
+      }
+      bar.appendChild(div);
+    });
+  }
 
-    var produceRate = 0, fetchRate = 0, bytesInRate = 0, bytesOutRate = 0;
-    if (prev && dt > 0) {
-      var sec = dt / 1000;
-      produceRate = Math.max(0, (data.produce_requests - prev.produce_requests) / sec);
-      fetchRate   = Math.max(0, (data.fetch_requests   - prev.fetch_requests)   / sec);
-      bytesInRate = Math.max(0, (data.bytes_in         - prev.bytes_in)         / sec);
-      bytesOutRate= Math.max(0, (data.bytes_out        - prev.bytes_out)        / sec);
+  // ── Cluster node strip ────────────────────────────────────────────────────
+  function renderClusterStrip(entries) {
+    var wrap = document.getElementById('cluster-strip-wrap');
+    var strip = document.getElementById('cluster-strip');
+    if (entries.length <= 1) { wrap.style.display='none'; return; }
+    wrap.style.display='block';
+    strip.innerHTML = entries.map(function(e) {
+      if (!e.online || !e.metrics) {
+        return '<div class="node-card offline">'
+          +'<div class="node-header"><span class="dot off"></span>Node '+e.broker_id+' <span style="color:var(--red);font-size:11px;margin-left:auto">offline</span></div>'
+          +'<div class="node-stat"><span>URL</span><span>'+e.admin_url+'</span></div>'
+          +'</div>';
+      }
+      var m = e.metrics;
+      var active = selectedBroker===e.broker_id ? 'border-color:var(--accent)' : '';
+      return '<div class="node-card" style="cursor:pointer;'+active+'" onclick="selectBroker('+e.broker_id+')">'
+        +'<div class="node-header"><span class="dot on"></span>Node '+e.broker_id
+        +' <span style="font-size:10px;color:var(--muted);margin-left:auto;font-weight:400">term '+m.raft_term+'</span></div>'
+        +'<div class="node-stat"><span>Connections</span><span>'+m.active_connections+'</span></div>'
+        +'<div class="node-stat"><span>Produce req/s</span><span>--</span></div>'
+        +'<div class="node-stat"><span>Topics</span><span>'+(m.topics?m.topics.length:0)+'</span></div>'
+        +'</div>';
+    }).join('');
+  }
+
+  window.selectBroker = function(id) { selectedBroker=id; refresh(); };
+
+  // ── Detail view for selected broker ──────────────────────────────────────
+  function renderDetail(entry, dt) {
+    if (!entry || !entry.metrics) return;
+    var m = entry.metrics;
+    var id = entry.broker_id;
+    var h = getHist(id);
+
+    var sec = dt>0 ? dt/1000 : 1;
+    var pRate=0, fRate=0, bIn=0, bOut=0;
+    if (h.prev) {
+      pRate = Math.max(0,(m.produce_requests-h.prev.produce_requests)/sec);
+      fRate = Math.max(0,(m.fetch_requests  -h.prev.fetch_requests)  /sec);
+      bIn   = Math.max(0,(m.bytes_in        -h.prev.bytes_in)        /sec);
+      bOut  = Math.max(0,(m.bytes_out       -h.prev.bytes_out)       /sec);
     }
-    setText('c-produce-rate', fmtNum(produceRate));
-    setText('c-fetch-rate',   fmtNum(fetchRate));
-    setText('c-bytes-in',     fmtBytes(bytesInRate)+'/s');
+    h.prev = m;
+    push(h.pRate, pRate); push(h.fRate, fRate);
+    push(h.bIn,  bIn);    push(h.bOut, bOut);
+    push(h.p50, m.produce_p50_ms||0);
+    push(h.p95, m.produce_p95_ms||0);
+    push(h.p99, m.produce_p99_ms||0);
 
-    push(series.produceRate, produceRate);
-    push(series.fetchRate, fetchRate);
-    push(series.bytesIn, bytesInRate);
-    push(series.bytesOut, bytesOutRate);
-    push(series.p50, data.produce_p50_ms || 0);
-    push(series.p95, data.produce_p95_ms || 0);
-    push(series.p99, data.produce_p99_ms || 0);
-  }
+    var topics = m.topics||[];
+    var parts=0; topics.forEach(function(t){parts+=t.partitions.length;});
 
-  function updatePartitionTable(data) {
-    var tbody = document.getElementById('partition-tbody');
-    if (!tbody) return;
-    var topics = data.topics || [];
-    var rows = [];
-    topics.forEach(function(t) {
-      (t.partitions || []).forEach(function(p) {
-        var isLeader = p.leader_broker_id === data.broker_id;
-        var leaderBadge = isLeader ? ' <span class="badge blue">leader</span>' : '';
-        rows.push('<tr><td>'+t.name+'</td><td>'+p.id+'</td>'
-          +'<td>'+p.leader_broker_id+leaderBadge+'</td>'
-          +'<td>'+p.hwm.toLocaleString()+'</td>'
-          +'<td>'+p.messages_in.toLocaleString()+'</td>'
-          +'<td>'+fmtBytes(p.bytes_in)+'</td></tr>');
+    setText('c-conn',   m.active_connections);
+    setText('c-topics', topics.length);
+    setText('c-parts',  parts);
+    setText('c-term',   m.raft_term||'N/A');
+    setText('c-elect',  m.raft_elections||0);
+    setText('c-prate',  fmtNum(pRate)+'/s');
+    setText('c-frate',  fmtNum(fRate)+'/s');
+    setText('c-bin',    fmtBytes(bIn)+'/s');
+
+    drawChart('chart-requests',[{data:h.pRate,color:'#58a6ff',label:'Produce req/s'},{data:h.fRate,color:'#3fb950',label:'Fetch req/s'}]);
+    drawChart('chart-bytes',   [{data:h.bIn, color:'#58a6ff',label:'In/s'},{data:h.bOut,color:'#f78166',label:'Out/s'}]);
+    drawChart('chart-latency', [{data:h.p99, color:'#f85149',label:'P99'},{data:h.p95,color:'#d29922',label:'P95'},{data:h.p50,color:'#3fb950',label:'P50'}]);
+
+    // Partition table
+    var ptBody = document.getElementById('partition-tbody');
+    if (ptBody) {
+      var rows=[];
+      topics.forEach(function(t){
+        (t.partitions||[]).forEach(function(p){
+          var isL = p.leader_broker_id===m.broker_id;
+          rows.push('<tr><td>'+t.name+'</td><td>'+p.id+'</td>'
+            +'<td>'+p.leader_broker_id+(isL?' <span class="badge blue">leader</span>':'')+'</td>'
+            +'<td>'+p.hwm.toLocaleString()+'</td>'
+            +'<td>'+p.messages_in.toLocaleString()+'</td>'
+            +'<td>'+fmtBytes(p.bytes_in)+'</td></tr>');
+        });
       });
-    });
-    tbody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="6" class="empty">No partitions yet</td></tr>';
+      ptBody.innerHTML = rows.length?rows.join(''):'<tr><td colspan="6" class="empty">No partitions yet</td></tr>';
+    }
+
+    // Consumer group table
+    var grpBody = document.getElementById('group-tbody');
+    if (grpBody) {
+      var rows=[];
+      (m.consumer_groups||[]).forEach(function(g){
+        var cls=g.lag>10000?'red':g.lag>1000?'orange':'green';
+        rows.push('<tr><td>'+g.group_id+'</td><td>'+g.topic+'</td><td>'+g.partition+'</td>'
+          +'<td>'+g.committed_offset.toLocaleString()+'</td>'
+          +'<td>'+g.hwm.toLocaleString()+'</td>'
+          +'<td><span class="badge '+cls+'">'+g.lag.toLocaleString()+'</span></td></tr>');
+      });
+      grpBody.innerHTML = rows.length?rows.join(''):'<tr><td colspan="6" class="empty">No consumer groups</td></tr>';
+    }
   }
 
-  function updateGroupTable(data) {
-    var tbody = document.getElementById('group-tbody');
-    if (!tbody) return;
-    var groups = data.consumer_groups || [];
-    var rows = [];
-    groups.forEach(function(g) {
-      var cls = g.lag > 10000 ? 'red' : g.lag > 1000 ? 'orange' : 'green';
-      rows.push('<tr><td>'+g.group_id+'</td><td>'+g.topic+'</td><td>'+g.partition+'</td>'
-        +'<td>'+g.committed_offset.toLocaleString()+'</td>'
-        +'<td>'+g.hwm.toLocaleString()+'</td>'
-        +'<td><span class="badge '+cls+'">'+g.lag.toLocaleString()+'</span></td></tr>');
-    });
-    tbody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="6" class="empty">No consumer groups</td></tr>';
-  }
-
-  var lastTs = 0;
-
+  // ── Main refresh loop ─────────────────────────────────────────────────────
   function refresh() {
-    fetch('/api/metrics')
-      .then(function(r){ return r.json(); })
-      .then(function(data) {
+    fetch('/api/cluster')
+      .then(function(r){return r.json();})
+      .then(function(entries) {
         var now = Date.now();
-        var dt = lastTs ? (now - lastTs) : 0;
+        var dt = lastTs ? (now-lastTs) : 0;
         lastTs = now;
 
-        updateCards(data, dt);
-        updatePartitionTable(data);
-        updateGroupTable(data);
+        // Auto-select first online broker
+        if (selectedBroker === null) {
+          for (var i=0; i<entries.length; i++) {
+            if (entries[i].online) { selectedBroker=entries[i].broker_id; break; }
+          }
+        }
 
-        drawChart('chart-requests', [
-          {data: series.produceRate, color: '#58a6ff', label: 'Produce req/s'},
-          {data: series.fetchRate,   color: '#3fb950', label: 'Fetch req/s'}
-        ]);
-        drawChart('chart-bytes', [
-          {data: series.bytesIn,  color: '#58a6ff', label: 'In/s'},
-          {data: series.bytesOut, color: '#f78166', label: 'Out/s'}
-        ]);
-        drawChart('chart-latency', [
-          {data: series.p99, color: '#f85149', label: 'P99 ms'},
-          {data: series.p95, color: '#d29922', label: 'P95 ms'},
-          {data: series.p50, color: '#3fb950', label: 'P50 ms'}
-        ]);
+        renderBrokerTabs(entries);
+        renderClusterStrip(entries);
+
+        var sel = null;
+        entries.forEach(function(e){ if(e.broker_id===selectedBroker) sel=e; });
+        if (!sel) sel = entries[0];
+        if (sel) {
+          var sub = 'Broker #'+sel.broker_id;
+          if (entries.length>1) sub += ' of '+entries.length+'-node cluster';
+          setText('hdr-sub', sub);
+          renderDetail(sel, dt);
+        }
 
         setText('last-updated', new Date().toLocaleTimeString());
-        prev = data;
       })
-      .catch(function(err) {
-        setText('last-updated', 'error: ' + err.message);
-      });
+      .catch(function(err){ setText('last-updated','error'); });
   }
 
   refresh();
   setInterval(refresh, INTERVAL);
-  window.addEventListener('resize', function() {
-    if (prev) {
-      drawChart('chart-requests', [{data:series.produceRate,color:'#58a6ff',label:'Produce req/s'},{data:series.fetchRate,color:'#3fb950',label:'Fetch req/s'}]);
-      drawChart('chart-bytes',    [{data:series.bytesIn,color:'#58a6ff',label:'In/s'},{data:series.bytesOut,color:'#f78166',label:'Out/s'}]);
-      drawChart('chart-latency',  [{data:series.p99,color:'#f85149',label:'P99 ms'},{data:series.p95,color:'#d29922',label:'P95 ms'},{data:series.p50,color:'#3fb950',label:'P50 ms'}]);
-    }
-  });
+  window.addEventListener('resize', refresh);
 })();
 </script>
 </body>
