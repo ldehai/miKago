@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -31,6 +32,9 @@ func main() {
 	// --cluster-brokers lists ALL brokers' Kafka endpoints for metadata and partition assignment.
 	// Format: id@host:kafkaPort (e.g., 0@localhost:9092,1@localhost:9093,2@localhost:9094)
 	clusterBrokersStr := flag.String("cluster-brokers", "", "Comma-separated list of all cluster brokers (e.g., 0@localhost:9092,1@localhost:9093)")
+	tlsEnabled := flag.Bool("tls-enabled", false, "Enable TLS for Kafka client connections")
+	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate file (PEM)")
+	tlsKey := flag.String("tls-key", "", "Path to TLS private key file (PEM)")
 	flag.Parse()
 
 	// Banner
@@ -93,12 +97,25 @@ func main() {
 		KnownBrokers:    knownBrokers,
 	}
 
+	// Build optional TLS config
+	var tlsCfg *tls.Config
+	if *tlsEnabled {
+		if *tlsCert == "" || *tlsKey == "" {
+			log.Fatal("[miKago] --tls-cert and --tls-key are required when --tls-enabled is set")
+		}
+		cert, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+		if err != nil {
+			log.Fatalf("[miKago] Failed to load TLS certificate: %v", err)
+		}
+		tlsCfg = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
+
 	// Initialize components
 	b := broker.NewBroker(cfg)
 	defer b.Close()
 	handler := api.NewHandler(b)
 	addr := fmt.Sprintf("%s:%d", *host, *port)
-	srv := server.NewServer(addr, handler, cfg.MaxRequestBytes)
+	srv := server.NewServer(addr, handler, cfg.MaxRequestBytes, tlsCfg)
 	log.Printf("[miKago] Data directory: %s", *dataDir)
 	log.Printf("[miKago] Limits: max_message=%dKB, max_request=%dMB, segment=%dMB",
 		cfg.MaxMessageBytes/1024, cfg.MaxRequestBytes/1024/1024, cfg.LogSegmentBytes/1024/1024)

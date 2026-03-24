@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -20,10 +21,11 @@ type Server struct {
 	listener        net.Listener
 	wg              sync.WaitGroup
 	maxRequestBytes int32
+	tlsConfig       *tls.Config
 }
 
-// NewServer creates a new Server.
-func NewServer(addr string, handler *api.Handler, maxRequestBytes int32) *Server {
+// NewServer creates a new Server. Pass a non-nil tlsConfig to enable TLS.
+func NewServer(addr string, handler *api.Handler, maxRequestBytes int32, tlsConfig *tls.Config) *Server {
 	if maxRequestBytes <= 0 {
 		maxRequestBytes = 100 * 1024 * 1024 // 100MB default
 	}
@@ -31,15 +33,24 @@ func NewServer(addr string, handler *api.Handler, maxRequestBytes int32) *Server
 		addr:            addr,
 		handler:         handler,
 		maxRequestBytes: maxRequestBytes,
+		tlsConfig:       tlsConfig,
 	}
 }
 
 // Start begins listening for connections. It blocks until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	var err error
-	s.listener, err = net.Listen("tcp", s.addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", s.addr, err)
+	if s.tlsConfig != nil {
+		s.listener, err = tls.Listen("tcp", s.addr, s.tlsConfig)
+		if err != nil {
+			return fmt.Errorf("failed to listen (TLS) on %s: %w", s.addr, err)
+		}
+		log.Printf("[miKago] TLS enabled")
+	} else {
+		s.listener, err = net.Listen("tcp", s.addr)
+		if err != nil {
+			return fmt.Errorf("failed to listen on %s: %w", s.addr, err)
+		}
 	}
 
 	log.Printf("[miKago] 🚀 Broker listening on %s", s.addr)
