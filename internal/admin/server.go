@@ -441,9 +441,9 @@ tr:hover td{background:var(--surface2)}
 
   <!-- Charts -->
   <div class="charts">
-    <div class="chart-box"><h3>Request Rate (req/s)</h3><canvas id="chart-requests" height="130"></canvas></div>
-    <div class="chart-box"><h3>Throughput (bytes/s)</h3><canvas id="chart-bytes" height="130"></canvas></div>
-    <div class="chart-box"><h3>Produce Latency (ms)</h3><canvas id="chart-latency" height="130"></canvas></div>
+    <div class="chart-box"><h3>Request Rate (req/s)</h3><canvas id="chart-requests" data-h="130"></canvas></div>
+    <div class="chart-box"><h3>Throughput (bytes/s)</h3><canvas id="chart-bytes" data-h="130"></canvas></div>
+    <div class="chart-box"><h3>Produce Latency (ms)</h3><canvas id="chart-latency" data-h="130"></canvas></div>
   </div>
 
   <!-- Tables -->
@@ -504,7 +504,7 @@ tr:hover td{background:var(--surface2)}
     if (!canvas) return;
     var dpr = window.devicePixelRatio||1;
     var rect = canvas.getBoundingClientRect();
-    var W = rect.width||300, H = parseInt(canvas.getAttribute('height'))||130;
+    var W = rect.width||300, H = parseInt(canvas.dataset.h)||130;
     canvas.width = W*dpr; canvas.height = H*dpr;
     var ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
