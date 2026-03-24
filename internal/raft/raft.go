@@ -71,6 +71,8 @@ type Raft struct {
 	peerLastSeen    map[string]time.Time   // last successful heartbeat response time per peer
 	OnLeaderChange  OnLeaderChangeFn       // callback when leadership changes (may be nil)
 	leaderReadyCh   chan struct{}           // closed by runLeader() once the heartbeat loop starts
+
+	done chan struct{} // closed by Stop() to terminate the run loop
 }
 
 // ApplyMsg represents a committed message to be applied to the state machine.
@@ -102,6 +104,7 @@ func NewRaft(id string, peers []Peer) *Raft {
 		matchIndex:   make(map[string]int),
 		ApplyCh:      make(chan ApplyMsg, 100),
 		peerLastSeen: make(map[string]time.Time),
+		done:         make(chan struct{}),
 	}
 
 	// Start the election timer (random duration between 150ms and 300ms)
@@ -118,9 +121,26 @@ func randomElectionDuration() time.Duration {
 	return time.Duration(150+rand.Intn(150)) * time.Millisecond
 }
 
+// Stop shuts down the Raft node, terminating its run loop.
+func (r *Raft) Stop() {
+	select {
+	case <-r.done:
+	default:
+		close(r.done)
+		// Wake up any timer-blocked goroutine so it can see done and exit.
+		r.electionTimer.Reset(0)
+	}
+}
+
 // run is the main lifecycle loop for the Raft node.
 func (r *Raft) run() {
 	for {
+		select {
+		case <-r.done:
+			return
+		default:
+		}
+
 		r.mu.Lock()
 		state := r.state
 		r.mu.Unlock()
@@ -137,7 +157,11 @@ func (r *Raft) run() {
 }
 
 func (r *Raft) runFollower() {
-	<-r.electionTimer.C
+	select {
+	case <-r.electionTimer.C:
+	case <-r.done:
+		return
+	}
 
 	// Election timeout elapsed without receiving heartbeat. Start an election.
 	r.mu.Lock()
@@ -194,7 +218,11 @@ func (r *Raft) runCandidate() {
 	}
 
 	// For now, if timeout hits again while candidate, we restart the election loop.
-	<-r.electionTimer.C
+	select {
+	case <-r.electionTimer.C:
+	case <-r.done:
+		return
+	}
 
 	r.mu.Lock()
 	if r.state == Candidate {
@@ -214,7 +242,11 @@ func (r *Raft) runLeader() {
 	}
 
 	for r.state == Leader {
-		<-r.heartbeatTimer.C
+		select {
+		case <-r.heartbeatTimer.C:
+		case <-r.done:
+			return
+		}
 
 		r.mu.Lock()
 		if r.state != Leader {
