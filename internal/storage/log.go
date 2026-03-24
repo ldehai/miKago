@@ -150,14 +150,22 @@ func (l *Log) recover() error {
 		return baseOffsets[i] < baseOffsets[j]
 	})
 
-	for _, baseOffset := range baseOffsets {
+	for i, baseOffset := range baseOffsets {
 		seg, err := NewSegment(l.dir, baseOffset)
 		if err != nil {
 			return fmt.Errorf("open segment %d: %w", baseOffset, err)
 		}
-		if err := seg.Recover(); err != nil {
-			seg.Close()
-			return fmt.Errorf("recover segment %d: %w", baseOffset, err)
+		isLast := i == len(baseOffsets)-1
+		if isLast {
+			// Active segment: full recovery needed to find exact nextOffset.
+			if err := seg.Recover(); err != nil {
+				seg.Close()
+				return fmt.Errorf("recover segment %d: %w", baseOffset, err)
+			}
+		} else {
+			// Closed segment: nextOffset == next segment's baseOffset.
+			// No need to read any records from the log file.
+			seg.RecoverClosed(baseOffsets[i+1])
 		}
 		l.segments = append(l.segments, seg)
 	}

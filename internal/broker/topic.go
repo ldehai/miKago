@@ -203,22 +203,42 @@ func (tm *TopicManager) recoverFromDisk() {
 		}
 
 		partitions := make([]*Partition, len(partIDs))
+		var partMu sync.Mutex
+		var wg sync.WaitGroup
 		for i, pid := range partIDs {
-			p, err := NewPartition(int32(pid), topicDir, tm.logSegmentBytes, tm.retentionMs)
-			if err != nil {
-				log.Printf("[miKago] Warning: cannot recover partition %d of topic %s: %v", pid, topicName, err)
-				continue
+			wg.Add(1)
+			go func(idx int, partID int) {
+				defer wg.Done()
+				p, err := NewPartition(int32(partID), topicDir, tm.logSegmentBytes, tm.retentionMs)
+				if err != nil {
+					log.Printf("[miKago] Warning: cannot recover partition %d of topic %s: %v", partID, topicName, err)
+					return
+				}
+				partMu.Lock()
+				partitions[idx] = p
+				partMu.Unlock()
+			}(i, pid)
+		}
+		wg.Wait()
+
+		// Filter out any partitions that failed to recover.
+		recovered := partitions[:0]
+		for _, p := range partitions {
+			if p != nil {
+				recovered = append(recovered, p)
 			}
-			partitions[i] = p
+		}
+		if len(recovered) == 0 {
+			continue
 		}
 
 		topic := &Topic{
 			Name:       topicName,
-			Partitions: partitions,
+			Partitions: recovered,
 		}
 		tm.topics[topicName] = topic
 		log.Printf("[miKago] Recovered topic %q with %d partition(s), hwm=%d",
-			topicName, len(partitions), partitions[len(partitions)-1].HighWaterMark())
+			topicName, len(recovered), recovered[len(recovered)-1].HighWaterMark())
 	}
 }
 

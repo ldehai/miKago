@@ -90,14 +90,33 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 
 // Recover scans the log file to rebuild the next offset and record count.
 // Called on startup when loading existing segments.
+// Uses the sparse index to seek near the end, then scans only the tail
+// (at most IndexInterval-1 records), reducing recovery from O(N) to O(1).
 func (s *Segment) Recover() error {
-	if _, err := s.logFile.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek log start: %w", err)
+	var scanPos int64
+	var lastOffset int64 = s.baseOffset - 1
+	var countFromIndex int // records accounted for by the last index entry
+
+	// Fast path: use the last index entry to skip most of the log.
+	if s.indexCount > 0 {
+		entryOff := int64((s.indexCount - 1) * IndexEntrySize)
+		var entry [IndexEntrySize]byte
+		if _, err := s.indexFile.ReadAt(entry[:], entryOff); err == nil {
+			relOffset := int32(binary.BigEndian.Uint32(entry[0:4]))
+			position := int32(binary.BigEndian.Uint32(entry[4:8]))
+			// The index entry covers records 0..relOffset (inclusive).
+			// relOffset is the relative offset of the indexed record.
+			lastOffset = s.baseOffset + int64(relOffset) - 1
+			countFromIndex = int(relOffset) // records before this index entry
+			scanPos = int64(position)
+		}
 	}
 
-	var lastOffset int64 = s.baseOffset - 1
-	var count int
+	if _, err := s.logFile.Seek(scanPos, io.SeekStart); err != nil {
+		return fmt.Errorf("seek log: %w", err)
+	}
 
+	var tailCount int
 	for {
 		rec, err := DecodeRecord(s.logFile)
 		if err != nil {
@@ -108,15 +127,16 @@ func (s *Segment) Recover() error {
 		}
 		lastOffset = rec.Offset
 		s.lastTimestamp = rec.Timestamp
-		count++
+		tailCount++
 	}
 
-	if count > 0 {
+	totalCount := countFromIndex + tailCount
+	if totalCount > 0 {
 		s.nextOffset = lastOffset + 1
 	} else {
 		s.nextOffset = s.baseOffset
 	}
-	s.recordCount = count % IndexInterval
+	s.recordCount = totalCount % IndexInterval
 
 	// Seek back to end for appending
 	if _, err := s.logFile.Seek(0, io.SeekEnd); err != nil {
@@ -124,6 +144,15 @@ func (s *Segment) Recover() error {
 	}
 
 	return nil
+}
+
+// RecoverClosed sets the state for a closed (non-active) segment whose
+// nextOffset is already known from the following segment's baseOffset.
+// This avoids reading the log file entirely for sealed segments.
+func (s *Segment) RecoverClosed(knownNextOffset int64) {
+	s.nextOffset = knownNextOffset
+	// recordCount only matters for index-write decisions during Append,
+	// which never happens on closed segments. Leave it 0.
 }
 
 // Append writes a record to the segment. Returns the byte position in the log file.
