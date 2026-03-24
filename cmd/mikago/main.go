@@ -142,8 +142,10 @@ func main() {
 	}()
 
 	// Start admin HTTP server (independent of the Kafka protocol port).
+	// Always binds to 0.0.0.0 so the dashboard is reachable from any interface;
+	// Kafka itself continues to use --host.
 	if *adminPort > 0 {
-		adminAddr := fmt.Sprintf("%s:%d", *host, *adminPort)
+		adminAddr := fmt.Sprintf("0.0.0.0:%d", *adminPort)
 		adminSrv := admin.New(adminAddr, metrics.Default, b)
 		adminSrv.Start(ctx)
 	}

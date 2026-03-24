@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"time"
@@ -14,6 +15,15 @@ import (
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/metrics"
 )
+
+// portOf extracts the port string from a "host:port" address.
+func portOf(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return port
+}
 
 // ─── JSON API types ───────────────────────────────────────────────────────────
 
@@ -89,7 +99,9 @@ func (s *Server) Start(ctx context.Context) {
 	s.httpSrv = &http.Server{Addr: s.addr, Handler: mux}
 
 	go func() {
-		log.Printf("[admin] Dashboard listening on http://%s", s.addr)
+		log.Printf("[admin] Dashboard  → http://localhost:%s/", portOf(s.addr))
+		log.Printf("[admin] Prometheus → http://localhost:%s/metrics", portOf(s.addr))
+		log.Printf("[admin] JSON API   → http://localhost:%s/api/metrics", portOf(s.addr))
 		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[admin] HTTP server error: %v", err)
 		}
