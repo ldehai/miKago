@@ -11,8 +11,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/andy/mikago/internal/admin"
 	"github.com/andy/mikago/internal/api"
 	"github.com/andy/mikago/internal/broker"
+	"github.com/andy/mikago/internal/metrics"
 	"github.com/andy/mikago/internal/raft"
 	"github.com/andy/mikago/internal/server"
 )
@@ -32,6 +34,7 @@ func main() {
 	// --cluster-brokers lists ALL brokers' Kafka endpoints for metadata and partition assignment.
 	// Format: id@host:kafkaPort (e.g., 0@localhost:9092,1@localhost:9093,2@localhost:9094)
 	clusterBrokersStr := flag.String("cluster-brokers", "", "Comma-separated list of all cluster brokers (e.g., 0@localhost:9092,1@localhost:9093)")
+	adminPort := flag.Int("admin-port", 8080, "Admin HTTP port for dashboard and metrics (0 to disable)")
 	tlsEnabled := flag.Bool("tls-enabled", false, "Enable TLS for Kafka client connections")
 	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate file (PEM)")
 	tlsKey := flag.String("tls-key", "", "Path to TLS private key file (PEM)")
@@ -117,6 +120,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	srv := server.NewServer(addr, handler, cfg.MaxRequestBytes, tlsCfg)
 	log.Printf("[miKago] Data directory: %s", *dataDir)
+	_ = metrics.Default // ensure metrics package is initialized
 	log.Printf("[miKago] Limits: max_message=%dKB, max_request=%dMB, segment=%dMB",
 		cfg.MaxMessageBytes/1024, cfg.MaxRequestBytes/1024/1024, cfg.LogSegmentBytes/1024/1024)
 	if cfg.RetentionMs > 0 {
@@ -136,6 +140,13 @@ func main() {
 		log.Printf("[miKago] Received signal %v, shutting down...", sig)
 		cancel()
 	}()
+
+	// Start admin HTTP server (independent of the Kafka protocol port).
+	if *adminPort > 0 {
+		adminAddr := fmt.Sprintf("%s:%d", *host, *adminPort)
+		adminSrv := admin.New(adminAddr, metrics.Default, b)
+		adminSrv.Start(ctx)
+	}
 
 	// Start server
 	log.Printf("[miKago] Starting broker (id=%d) on %s", cfg.BrokerID, addr)

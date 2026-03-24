@@ -2,6 +2,7 @@ package api
 
 import (
 	"github.com/andy/mikago/internal/broker"
+	"github.com/andy/mikago/internal/metrics"
 	"github.com/andy/mikago/internal/protocol"
 )
 
@@ -109,6 +110,14 @@ func HandleFetchZeroCopy(header *protocol.RequestHeader, body *protocol.Decoder,
 			enc.PutInt16(protocol.ErrNone)
 			enc.PutInt64(hwm)
 			enc.PutInt32(bytesToRead) // size of the upcoming byte array
+
+			// Track bytes sent to consumers (hot path: atomic add only).
+			if bytesToRead > 0 {
+				metrics.Default.BytesOut.Add(int64(bytesToRead))
+				metrics.Default.MessagesOut.Add(1)
+				ps := metrics.Default.Partition(tf.name, pf.partition)
+				ps.BytesOut.Add(int64(bytesToRead))
+			}
 
 			if bytesToRead > 0 && file != nil {
 				// Commit the current encoder to the multi payload

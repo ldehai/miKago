@@ -2,19 +2,22 @@ package api
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/andy/mikago/internal/broker"
+	"github.com/andy/mikago/internal/metrics"
 	"github.com/andy/mikago/internal/protocol"
 )
 
 // Handler dispatches Kafka API requests to the appropriate handler.
 type Handler struct {
-	Broker *broker.Broker
+	Broker  *broker.Broker
+	metrics *metrics.Store
 }
 
 // NewHandler creates a new API handler.
 func NewHandler(b *broker.Broker) *Handler {
-	return &Handler{Broker: b}
+	return &Handler{Broker: b, metrics: metrics.Default}
 }
 
 // HandleRequest processes a raw Kafka request and returns the response payload.
@@ -40,10 +43,17 @@ func (h *Handler) HandleRequest(data []byte) (protocol.Payload, error) {
 		respPayload, err = HandleMetadata(header, decoder, h.Broker)
 
 	case protocol.APIKeyProduce:
+		t0 := time.Now()
 		respPayload, err = HandleProduce(header, decoder, h.Broker)
+		h.metrics.ProduceRequests.Add(1)
+		h.metrics.ProduceDurations.Record(time.Since(t0))
 
 	case protocol.APIKeyFetch:
-		return HandleFetchZeroCopy(header, decoder, h.Broker)
+		t0 := time.Now()
+		payload, ferr := HandleFetchZeroCopy(header, decoder, h.Broker)
+		h.metrics.FetchRequests.Add(1)
+		h.metrics.FetchDurations.Record(time.Since(t0))
+		return payload, ferr
 
 	case protocol.APIKeyListOffsets:
 		respPayload, err = HandleListOffsets(header, decoder, h.Broker)

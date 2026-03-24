@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/andy/mikago/internal/api"
+	"github.com/andy/mikago/internal/metrics"
 	"github.com/andy/mikago/internal/protocol"
 )
 
@@ -22,6 +23,7 @@ type Server struct {
 	wg              sync.WaitGroup
 	maxRequestBytes int32
 	tlsConfig       *tls.Config
+	metrics         *metrics.Store
 }
 
 // NewServer creates a new Server. Pass a non-nil tlsConfig to enable TLS.
@@ -34,6 +36,7 @@ func NewServer(addr string, handler *api.Handler, maxRequestBytes int32, tlsConf
 		handler:         handler,
 		maxRequestBytes: maxRequestBytes,
 		tlsConfig:       tlsConfig,
+		metrics:         metrics.Default,
 	}
 }
 
@@ -87,6 +90,8 @@ func (s *Server) Start(ctx context.Context) error {
 // Kafka uses size-delimited framing: each message starts with a 4-byte big-endian size.
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	s.metrics.ActiveConnections.Add(1)
+	defer s.metrics.ActiveConnections.Add(-1)
 
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[miKago] New connection from %s", conn.RemoteAddr())

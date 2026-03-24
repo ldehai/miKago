@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/andy/mikago/internal/broker"
+	"github.com/andy/mikago/internal/metrics"
 	"github.com/andy/mikago/internal/protocol"
 )
 
@@ -120,9 +121,11 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 			if len(messages) > 0 {
 				keys := make([][]byte, len(messages))
 				vals := make([][]byte, len(messages))
+				totalBytes := int64(0)
 				for idx, msg := range messages {
 					keys[idx] = msg.key
 					vals[idx] = msg.value
+					totalBytes += int64(len(msg.key)) + int64(len(msg.value))
 				}
 				var err error
 				baseOffset, err = partition.AppendBatch(keys, vals)
@@ -135,8 +138,21 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 					})
 					continue
 				}
+				// Instrument throughput counters on success (hot path: atomic adds only).
+				msgCount := int64(len(messages))
+				metrics.Default.MessagesIn.Add(msgCount)
+				metrics.Default.BytesIn.Add(totalBytes)
+				ps := metrics.Default.Partition(topicName, partitionID)
+				ps.MessagesIn.Add(msgCount)
+				ps.BytesIn.Add(totalBytes)
 			} else {
 				baseOffset, _ = partition.AppendBatch([][]byte{nil}, [][]byte{recordSet})
+				sz := int64(len(recordSet))
+				metrics.Default.MessagesIn.Add(1)
+				metrics.Default.BytesIn.Add(sz)
+				ps := metrics.Default.Partition(topicName, partitionID)
+				ps.MessagesIn.Add(1)
+				ps.BytesIn.Add(sz)
 			}
 
 			pResults = append(pResults, partitionResult{

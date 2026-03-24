@@ -5,6 +5,8 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/andy/mikago/internal/metrics"
 )
 
 // OnLeaderChangeFn is called when this node's leadership status changes.
@@ -354,6 +356,7 @@ func (r *Raft) becomeFollower(term int) {
 	r.currentTerm = term
 	r.votedFor = ""
 	r.electionTimer.Reset(randomElectionDuration())
+	metrics.Default.RaftTerm.Store(int64(term))
 
 	if wasLeader && r.OnLeaderChange != nil {
 		cb := r.OnLeaderChange
@@ -368,6 +371,10 @@ func (r *Raft) becomeCandidate() {
 	r.currentTerm++
 	r.votedFor = r.ID
 	log.Printf("[Raft %s] Term %d: Election timeout -> Becoming Candidate", r.ID, r.currentTerm)
+
+	// Instrument: track election count and current term (atomic, hot-path safe).
+	metrics.Default.RaftElections.Add(1)
+	metrics.Default.RaftTerm.Store(int64(r.currentTerm))
 
 	// Reset election timer so we don't block forever if election splits.
 	r.electionTimer.Reset(randomElectionDuration())

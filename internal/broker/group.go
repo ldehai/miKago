@@ -40,6 +40,24 @@ func (gm *GroupManager) CommitOffset(groupID, topic string, partition int32, off
 	topicMap[partition] = offset
 }
 
+// AllGroupOffsets returns a deep copy of all committed offsets for all groups.
+// Used by the admin server to compute consumer lag.
+func (gm *GroupManager) AllGroupOffsets() map[string]map[string]map[int32]int64 {
+	gm.mu.RLock()
+	defer gm.mu.RUnlock()
+	result := make(map[string]map[string]map[int32]int64, len(gm.offsets))
+	for g, topics := range gm.offsets {
+		result[g] = make(map[string]map[int32]int64, len(topics))
+		for t, parts := range topics {
+			result[g][t] = make(map[int32]int64, len(parts))
+			for p, offset := range parts {
+				result[g][t][p] = offset
+			}
+		}
+	}
+	return result
+}
+
 // FetchOffset retrieves the committed offset for a given group, topic, and partition.
 // Returns the offset and true if found, or -1 and false if no offset is saved.
 func (gm *GroupManager) FetchOffset(groupID, topic string, partition int32) (int64, bool) {

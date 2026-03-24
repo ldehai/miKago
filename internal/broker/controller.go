@@ -52,6 +52,18 @@ func (pc *PartitionController) IsLeaderFor(topic string, partitionID int32) bool
 	return leader == pc.selfID
 }
 
+// AllLeaders returns a snapshot of all partition-leader assignments.
+// Used by the admin server for the dashboard.
+func (pc *PartitionController) AllLeaders() map[string]int32 {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	result := make(map[string]int32, len(pc.leaders))
+	for k, v := range pc.leaders {
+		result[k] = v
+	}
+	return result
+}
+
 // GetLeader returns the broker ID of the current leader for the given partition.
 // Returns selfID when no assignment is known.
 func (pc *PartitionController) GetLeader(topic string, partitionID int32) int32 {
