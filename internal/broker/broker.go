@@ -105,6 +105,15 @@ func NewBroker(cfg Config) *Broker {
 		if cfg.AdminPort > 0 {
 			b.Raft.SetAdminAddr(fmt.Sprintf("http://%s:%d", cfg.Host, cfg.AdminPort))
 		}
+
+		// Re-assign partition leaders whenever a new topic is auto-created so that
+		// topics created after the initial election are distributed across brokers.
+		b.TopicManager.OnNewTopic = func(topicName string) {
+			if b.Raft.IsLeader() {
+				log.Printf("[Broker %d] New topic %q created — re-assigning partition leaders", b.Config.BrokerID, topicName)
+				b.assignPartitionLeaders()
+			}
+		}
 	}
 
 	return b

@@ -148,6 +148,10 @@ type TopicManager struct {
 	logSegmentBytes      int64
 	retentionMs          int64
 	defaultNumPartitions int
+
+	// OnNewTopic is called in a goroutine whenever a brand-new topic is created.
+	// Set by the Broker to trigger partition leader re-assignment on the Raft leader.
+	OnNewTopic func(topicName string)
 }
 
 func NewTopicManager(dataDir string, logSegmentBytes int64, retentionMs int64, defaultNumPartitions int) *TopicManager {
@@ -280,11 +284,13 @@ func (tm *TopicManager) CreateTopic(name string, numPartitions int) (*Topic, err
 }
 
 // GetOrCreateTopic gets an existing topic or creates one with defaultNumPartitions.
+// If a new topic is created and OnNewTopic is set, it is called in a goroutine
+// after the lock is released so callers can trigger partition re-assignment.
 func (tm *TopicManager) GetOrCreateTopic(name string) *Topic {
 	tm.mu.Lock()
-	defer tm.mu.Unlock()
 
 	if t, exists := tm.topics[name]; exists {
+		tm.mu.Unlock()
 		return t
 	}
 
@@ -308,6 +314,13 @@ func (tm *TopicManager) GetOrCreateTopic(name string) *Topic {
 		Partitions: partitions,
 	}
 	tm.topics[name] = topic
+	hook := tm.OnNewTopic
+	tm.mu.Unlock()
+
+	// Notify outside the lock to avoid deadlock (hook may call AllTopics).
+	if hook != nil {
+		go hook(name)
+	}
 	return topic
 }
 
