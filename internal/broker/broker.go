@@ -135,11 +135,28 @@ func (b *Broker) onRaftLeaderChange(isLeader bool) {
 	}
 
 	b.assignPartitionLeaders()
+
+	// Keep assigning partitions created after election (e.g. on follower brokers).
+	go b.runLeaderAssignmentLoop()
 }
 
-// assignPartitionLeaders distributes all known partition leaders evenly across active brokers.
-// Called only by the current Raft leader (Controller).
+// assignPartitionLeaders distributes ALL partition leaders evenly across active
+// brokers. Called on initial leader election and after cluster rebalance.
 func (b *Broker) assignPartitionLeaders() {
+	b.doAssign(false)
+}
+
+// assignUnassignedPartitions only assigns partitions that have no existing
+// leader entry. Safe to call frequently; proposes nothing if everything is
+// already assigned.
+func (b *Broker) assignUnassignedPartitions() {
+	b.doAssign(true)
+}
+
+// doAssign is the shared implementation.
+// onlyUnassigned=false → replace all assignments (rebalance).
+// onlyUnassigned=true  → skip partitions that already have an assignment.
+func (b *Broker) doAssign(onlyUnassigned bool) {
 	activeBrokerIDs := b.getActiveBrokerIDs()
 	if len(activeBrokerIDs) == 0 {
 		activeBrokerIDs = []int32{b.Config.BrokerID}
@@ -150,6 +167,10 @@ func (b *Broker) assignPartitionLeaders() {
 	idx := 0
 	for _, topic := range topics {
 		for _, partition := range topic.Partitions {
+			if onlyUnassigned && b.Controller.HasAssignment(topic.Name, partition.ID()) {
+				idx++ // keep round-robin counter consistent
+				continue
+			}
 			brokerID := activeBrokerIDs[idx%len(activeBrokerIDs)]
 			assignments = append(assignments, raft.PartitionLeaderAssignment{
 				Topic:       topic.Name,
@@ -161,7 +182,9 @@ func (b *Broker) assignPartitionLeaders() {
 	}
 
 	if len(assignments) == 0 {
-		log.Printf("[Broker %d] No partitions to assign yet", b.Config.BrokerID)
+		if !onlyUnassigned {
+			log.Printf("[Broker %d] No partitions to assign yet", b.Config.BrokerID)
+		}
 		return
 	}
 
@@ -171,8 +194,22 @@ func (b *Broker) assignPartitionLeaders() {
 		return
 	}
 
-	log.Printf("[Broker %d] Controller: assigned %d partition(s) across %d broker(s): %v",
+	log.Printf("[Broker %d] Controller: assigned %d new partition(s) across %d broker(s): %v",
 		b.Config.BrokerID, len(assignments), len(activeBrokerIDs), activeBrokerIDs)
+}
+
+// runLeaderAssignmentLoop runs on the Raft leader and periodically assigns any
+// partitions that were created on follower brokers (and thus not caught by the
+// OnNewTopic hook on the leader). Exits as soon as this node steps down.
+func (b *Broker) runLeaderAssignmentLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if !b.Raft.IsLeader() {
+			return
+		}
+		b.assignUnassignedPartitions()
+	}
 }
 
 // getActiveBrokerIDs returns the sorted list of broker IDs to use for partition assignment.

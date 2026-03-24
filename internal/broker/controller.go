@@ -75,3 +75,13 @@ func (pc *PartitionController) GetLeader(topic string, partitionID int32) int32 
 	}
 	return leader
 }
+
+// HasAssignment returns true if the partition has an explicit leader assignment
+// (i.e. a LeaderAssignmentCmd has been applied for it). Used to distinguish
+// "self is leader" from "no assignment yet, falling back to self".
+func (pc *PartitionController) HasAssignment(topic string, partitionID int32) bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	_, ok := pc.leaders[partitionKey(topic, partitionID)]
+	return ok
+}
