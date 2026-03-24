@@ -5,7 +5,6 @@ import (
 
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/protocol"
-	"github.com/andy/mikago/internal/raft"
 )
 
 // HandleProduce handles Produce requests (api_key=0, v0-v2).
@@ -105,52 +104,39 @@ func HandleProduce(header *protocol.RequestHeader, body *protocol.Decoder, b *br
 			partition := topic.Partitions[partitionID]
 			var baseOffset int64 = -1
 
-			if b.Raft != nil {
-				// Replicate via Raft cluster
-				_, _, isLeader := b.Raft.Propose(raft.ReplicateCmd{
-					Topic:       topicName,
-					PartitionID: partitionID,
-					RecordSet:   recordSet,
+			// In cluster mode, check per-partition leadership before writing.
+			if b.Raft != nil && !b.Controller.IsLeaderFor(topicName, partitionID) {
+				pResults = append(pResults, partitionResult{
+					partition:  partitionID,
+					errCode:    protocol.ErrNotLeaderForPartition,
+					baseOffset: -1,
+					appendTime: -1,
 				})
+				continue
+			}
 
-				if !isLeader {
+			// Write directly to local storage (this broker is the partition leader).
+			messages := parseMessageSet(recordSet)
+			if len(messages) > 0 {
+				keys := make([][]byte, len(messages))
+				vals := make([][]byte, len(messages))
+				for idx, msg := range messages {
+					keys[idx] = msg.key
+					vals[idx] = msg.value
+				}
+				var err error
+				baseOffset, err = partition.AppendBatch(keys, vals)
+				if err != nil {
 					pResults = append(pResults, partitionResult{
 						partition:  partitionID,
-						errCode:    protocol.ErrNotLeaderForPartition, // Return error if not leader
+						errCode:    protocol.ErrUnknownServerError,
 						baseOffset: -1,
 						appendTime: -1,
 					})
 					continue
 				}
-
-				// Basic MVP: Assuming it succeeds in background immediately via Raft Loop 
-				// (In production, we should wait on a channel for actual Raft commit index before responding)
-				// Here we just fetch the next offset artificially
-				baseOffset = partition.NextOffset()
 			} else {
-				// Standalone Logic — batch append for performance
-				messages := parseMessageSet(recordSet)
-				if len(messages) > 0 {
-					keys := make([][]byte, len(messages))
-					vals := make([][]byte, len(messages))
-					for idx, msg := range messages {
-						keys[idx] = msg.key
-						vals[idx] = msg.value
-					}
-					var err error
-					baseOffset, err = partition.AppendBatch(keys, vals)
-					if err != nil {
-						pResults = append(pResults, partitionResult{
-							partition:  partitionID,
-							errCode:    protocol.ErrUnknownServerError,
-							baseOffset: -1,
-							appendTime: -1,
-						})
-						continue
-					}
-				} else {
-					baseOffset, _ = partition.AppendBatch([][]byte{nil}, [][]byte{recordSet})
-				}
+				baseOffset, _ = partition.AppendBatch([][]byte{nil}, [][]byte{recordSet})
 			}
 
 			pResults = append(pResults, partitionResult{

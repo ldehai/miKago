@@ -76,6 +76,7 @@ func (rw *RaftRPCWrapper) AppendEntries(args *AppendEntriesArgs, reply *AppendEn
 
 	// Recognize the leader and reset election timer
 	rw.rf.electionTimer.Reset(randomElectionDuration())
+	rw.rf.currentLeaderID = args.LeaderID // track who the current leader is
 
 	if args.Term > rw.rf.currentTerm {
 		rw.rf.becomeFollower(args.Term)
@@ -151,8 +152,10 @@ type NetServer struct {
 
 // StartRaftServer starts the RPC server for this Raft node.
 func StartRaftServer(rf *Raft, port int) (*NetServer, error) {
-	// Register the command type with gob so it can be sent over RPC within interface{}
+	// Register all command types with gob so they can be sent over RPC within interface{}
 	gob.Register(ReplicateCmd{})
+	gob.Register(LeaderAssignmentCmd{})
+	gob.Register(PartitionLeaderAssignment{})
 
 	rpcServer := rpc.NewServer()
 	

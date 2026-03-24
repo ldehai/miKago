@@ -1,6 +1,8 @@
 package api
 
 import (
+	"strconv"
+
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/protocol"
 )
@@ -37,18 +39,32 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 	enc := protocol.GetEncoder()
 	protocol.EncodeResponseHeader(enc, header.CorrelationID)
 
-	// Brokers array
-	enc.PutArrayLength(1)
-	enc.PutInt32(b.Config.BrokerID)
-	enc.PutString(b.Config.Host)
-	enc.PutInt32(b.Config.Port)
-	if header.APIVersion >= 1 {
-		enc.PutString("") // rack (empty string, not null)
+	// Brokers array — include all known cluster brokers so clients can connect to any partition leader.
+	brokers := b.AllBrokers()
+	enc.PutArrayLength(len(brokers))
+	for _, br := range brokers {
+		enc.PutInt32(br.ID)
+		enc.PutString(br.Host)
+		enc.PutInt32(br.Port)
+		if header.APIVersion >= 1 {
+			enc.PutString("") // rack (empty string)
+		}
 	}
 
-	// v1: controller_id
+	// v1: controller_id (the current Raft leader / Controller)
 	if header.APIVersion >= 1 {
-		enc.PutInt32(b.Config.BrokerID) // we are the controller
+		controllerID := b.Config.BrokerID // default: self
+		if b.Raft != nil {
+			leaderID := b.Raft.GetLeaderID()
+			// Convert Raft peer string ID (e.g. "1") back to broker ID if available.
+			for _, br := range brokers {
+				if leaderID == intToStr(br.ID) {
+					controllerID = br.ID
+					break
+				}
+			}
+		}
+		enc.PutInt32(controllerID)
 	}
 
 	// Determine which topics to return
@@ -75,21 +91,29 @@ func HandleMetadata(header *protocol.RequestHeader, body *protocol.Decoder, b *b
 
 		// v1: is_internal
 		if header.APIVersion >= 1 {
-			enc.PutBool(false) // not internal
+			enc.PutBool(false)
 		}
 
 		// Partitions array
 		enc.PutArrayLength(len(t.Partitions))
 		for _, p := range t.Partitions {
+			// Ask the controller which broker is leader for this partition.
+			leaderID := b.Controller.GetLeader(t.Name, p.ID())
+
 			enc.PutInt16(protocol.ErrNone)
 			enc.PutInt32(p.ID())
-			enc.PutInt32(b.Config.BrokerID) // leader
-			enc.PutArrayLength(1)           // replicas
-			enc.PutInt32(b.Config.BrokerID)
+			enc.PutInt32(leaderID) // leader broker ID
+			enc.PutArrayLength(1)  // replicas: only the leader for now (no ISR replication)
+			enc.PutInt32(leaderID)
 			enc.PutArrayLength(1) // ISR
-			enc.PutInt32(b.Config.BrokerID)
+			enc.PutInt32(leaderID)
 		}
 	}
 
 	return protocol.EncoderPayload{Encoder: enc}, nil
+}
+
+// intToStr converts an int32 broker ID to the string form used as a Raft peer ID.
+func intToStr(id int32) string {
+	return strconv.Itoa(int(id))
 }

@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// OnLeaderChangeFn is called when this node's leadership status changes.
+// isLeader=true means this node just became the Raft leader (Controller).
+// Called in a separate goroutine, safe to block.
+type OnLeaderChangeFn func(isLeader bool)
+
 // State representing the node's current role in the cluster.
 type State int
 
@@ -60,6 +65,11 @@ type Raft struct {
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
 	ApplyCh        chan ApplyMsg
+
+	// Partition-level leader election support
+	currentLeaderID string                 // ID of the current known leader (self if leader)
+	peerLastSeen    map[string]time.Time   // last successful heartbeat response time per peer
+	OnLeaderChange  OnLeaderChangeFn       // callback when leadership changes (may be nil)
 }
 
 // ApplyMsg represents a committed message to be applied to the state machine.
@@ -79,17 +89,18 @@ type ReplicateCmd struct {
 // NewRaft creates and initializes a new Raft node.
 func NewRaft(id string, peers []Peer) *Raft {
 	r := &Raft{
-		ID:          id,
-		Peers:       peers,
-		state:       Follower,
-		currentTerm: 0,
-		votedFor:    "",
-		log:         make([]LogEntry, 1), // Dummy entry at index 0 for 1-based indexing simplicity
-		commitIndex: 0,
-		lastApplied: 0,
-		nextIndex:   make(map[string]int),
-		matchIndex:  make(map[string]int),
-		ApplyCh:     make(chan ApplyMsg, 100),
+		ID:           id,
+		Peers:        peers,
+		state:        Follower,
+		currentTerm:  0,
+		votedFor:     "",
+		log:          make([]LogEntry, 1), // Dummy entry at index 0 for 1-based indexing simplicity
+		commitIndex:  0,
+		lastApplied:  0,
+		nextIndex:    make(map[string]int),
+		matchIndex:   make(map[string]int),
+		ApplyCh:      make(chan ApplyMsg, 100),
+		peerLastSeen: make(map[string]time.Time),
 	}
 
 	// Start the election timer (random duration between 150ms and 300ms)
@@ -239,6 +250,9 @@ func (r *Raft) runLeader() {
 					r.mu.Lock()
 					defer r.mu.Unlock()
 
+					// Track peer health: update last seen time on any successful RPC response
+					r.peerLastSeen[p.ID] = time.Now()
+
 					// Stepped down
 					if r.state != Leader || term != r.currentTerm {
 						return
@@ -295,11 +309,17 @@ func (r *Raft) runLeader() {
 // becomeFollower transit node to Follower state.
 // Assumes caller holds r.mu
 func (r *Raft) becomeFollower(term int) {
+	wasLeader := r.state == Leader
 	log.Printf("[Raft %s] Term %d: Becoming Follower", r.ID, term)
 	r.state = Follower
 	r.currentTerm = term
 	r.votedFor = ""
 	r.electionTimer.Reset(randomElectionDuration())
+
+	if wasLeader && r.OnLeaderChange != nil {
+		cb := r.OnLeaderChange
+		go cb(false)
+	}
 }
 
 // becomeCandidate transit node to Candidate state and initiates an election.
@@ -317,8 +337,9 @@ func (r *Raft) becomeCandidate() {
 // becomeLeader transit node to Leader state.
 // Assumes caller holds r.mu
 func (r *Raft) becomeLeader() {
-	log.Printf("[Raft %s] Term %d: Election won! Becoming LEADER 👑", r.ID, r.currentTerm)
+	log.Printf("[Raft %s] Term %d: Election won! Becoming LEADER", r.ID, r.currentTerm)
 	r.state = Leader
+	r.currentLeaderID = r.ID
 
 	// Initialize volatile leader state
 	lastIndex := r.getLastLogIndex()
@@ -326,6 +347,32 @@ func (r *Raft) becomeLeader() {
 		r.nextIndex[peer.ID] = lastIndex + 1
 		r.matchIndex[peer.ID] = 0
 	}
+
+	if r.OnLeaderChange != nil {
+		cb := r.OnLeaderChange
+		go cb(true)
+	}
+}
+
+// GetLeaderID returns the current known leader ID (empty if unknown).
+func (r *Raft) GetLeaderID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.currentLeaderID
+}
+
+// ActivePeerIDs returns the IDs of peers that responded to heartbeats within the given threshold.
+func (r *Raft) ActivePeerIDs(threshold time.Duration) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	var active []string
+	for id, lastSeen := range r.peerLastSeen {
+		if now.Sub(lastSeen) <= threshold {
+			active = append(active, id)
+		}
+	}
+	return active
 }
 
 // Helper methods (assuming caller holds r.mu)
