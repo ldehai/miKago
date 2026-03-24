@@ -191,7 +191,7 @@ miKago achieves high throughput through several key optimizations in the storage
 - [x] **Phase 3**: Multiple partitions & consumer groups
 - [x] **Phase 4**: Multi-broker replication (Raft Data Log Replication)
 - [x] **Phase 5**: Zero-Copy Network I/O (using `sendfile` for `Fetch` API to bypass user-space memory)
-- [ ] **Phase 6**: Partition-Level Leadership (Fine-grained leader election per partition for load balancing)
+- [x] **Phase 6**: Partition-Level Leadership (Controller-based per-partition leader election; leaders distributed evenly across brokers; automatic failover via `Raft.Stop()` + re-election)
 - [ ] **Phase 7**: Exactly-Once Semantics (EOS) / Idempotent Producers
 - [ ] **Phase 8**: Security (TLS/SSL Network Encryption & SASL Authentication/ACLs)
 
