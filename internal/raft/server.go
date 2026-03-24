@@ -168,6 +168,7 @@ func StartRaftServer(rf *Raft, port int) (*NetServer, error) {
 	gob.Register(ReplicateCmd{})
 	gob.Register(LeaderAssignmentCmd{})
 	gob.Register(PartitionLeaderAssignment{})
+	gob.Register(MembershipChangeCmd{})
 
 	rpcServer := rpc.NewServer()
 	

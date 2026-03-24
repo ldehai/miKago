@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/andy/mikago/internal/admin"
 	"github.com/andy/mikago/internal/api"
@@ -39,6 +43,7 @@ func main() {
 	tlsEnabled := flag.Bool("tls-enabled", false, "Enable TLS for Kafka client connections")
 	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate file (PEM)")
 	tlsKey := flag.String("tls-key", "", "Path to TLS private key file (PEM)")
+	joinAddr := flag.String("join", "", "Admin URL of an existing cluster node to join dynamically (e.g. http://localhost:8080)")
 	flag.Parse()
 
 	// Banner
@@ -160,6 +165,17 @@ func main() {
 		adminSrv.Start(ctx)
 	}
 
+	// If --join is specified, register this node with the existing cluster after a
+	// brief delay to let our own admin server and Raft port start listening.
+	if *joinAddr != "" && cfg.RaftPort > 0 {
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			joinCluster(*joinAddr, fmt.Sprintf("%d", cfg.BrokerID),
+				fmt.Sprintf("%s:%d", cfg.Host, cfg.RaftPort),
+				fmt.Sprintf("http://%s:%d", cfg.Host, cfg.AdminPort))
+		}()
+	}
+
 	// Start server
 	log.Printf("[miKago] Starting broker (id=%d) on %s", cfg.BrokerID, addr)
 	if err := srv.Start(ctx); err != nil {
@@ -167,4 +183,38 @@ func main() {
 	}
 
 	log.Println("[miKago] Broker stopped.")
+}
+
+// joinCluster sends a POST /api/cluster/join request to an existing cluster node
+// so this broker is added dynamically without restarting any existing nodes.
+// It retries up to 5 times in case the target node is still starting up.
+func joinCluster(targetAdminURL, peerID, raftAddr, adminAddr string) {
+	payload := map[string]string{
+		"peer_id":    peerID,
+		"raft_addr":  raftAddr,
+		"admin_addr": adminAddr,
+	}
+	body, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 5 * time.Second}
+	url := targetAdminURL + "/api/cluster/join"
+
+	for attempt := 1; attempt <= 5; attempt++ {
+		resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				log.Printf("[miKago] Successfully joined cluster via %s (peer_id=%s, raft=%s)",
+					targetAdminURL, peerID, raftAddr)
+				return
+			}
+			log.Printf("[miKago] Join attempt %d/%d: HTTP %d from %s", attempt, 5, resp.StatusCode, url)
+		} else {
+			log.Printf("[miKago] Join attempt %d/%d: %v", attempt, 5, err)
+		}
+		if attempt < 5 {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			body, _ = json.Marshal(payload) // re-marshal for new reader
+		}
+	}
+	log.Printf("[miKago] WARNING: Could not join cluster via %s after 5 attempts; starting as standalone", targetAdminURL)
 }

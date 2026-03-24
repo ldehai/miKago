@@ -243,6 +243,14 @@ func (b *Broker) runStateMachine() {
 			log.Printf("[Broker %d] Applied %d partition leader assignment(s) from Raft log",
 				b.Config.BrokerID, len(cmd.Assignments))
 
+		case raft.MembershipChangeCmd:
+			// Cluster membership change: add or remove a Raft peer on every node.
+			if cmd.Op == "add" {
+				b.Raft.AddPeer(cmd.Peer)
+				log.Printf("[Broker %d] Applied MembershipChangeCmd: added peer %s (%s)",
+					b.Config.BrokerID, cmd.Peer.ID, cmd.Peer.Address)
+			}
+
 		default:
 			log.Printf("[Broker %d] Unknown command type in Raft log (index=%d)", b.Config.BrokerID, msg.CommandIndex)
 		}

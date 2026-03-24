@@ -4,9 +4,11 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/andy/mikago/internal/broker"
 	"github.com/andy/mikago/internal/metrics"
+	"github.com/andy/mikago/internal/raft"
 )
 
 // portOf extracts the port string from a "host:port" address.
@@ -118,6 +121,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/metrics", s.handlePrometheus)
 	mux.HandleFunc("/api/metrics", s.handleAPIMetrics)
 	mux.HandleFunc("/api/cluster", s.handleCluster)
+	mux.HandleFunc("/api/cluster/join", s.handleJoin)
 
 	s.httpSrv = &http.Server{Addr: s.addr, Handler: mux}
 
@@ -245,6 +249,79 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(entries)
+}
+
+// joinRequest is the body for POST /api/cluster/join.
+type joinRequest struct {
+	PeerID    string `json:"peer_id"`
+	RaftAddr  string `json:"raft_addr"`
+	AdminAddr string `json:"admin_addr,omitempty"`
+}
+
+// handleJoin handles POST /api/cluster/join.
+// A new node sends its Raft peer info here; if this node is the leader it
+// proposes a MembershipChangeCmd; otherwise it forwards to the leader.
+func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req joinRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.PeerID == "" || req.RaftAddr == "" {
+		http.Error(w, "peer_id and raft_addr are required", http.StatusBadRequest)
+		return
+	}
+	if s.broker.Raft == nil {
+		http.Error(w, "cluster mode not enabled on this broker", http.StatusServiceUnavailable)
+		return
+	}
+
+	peer := raft.Peer{ID: req.PeerID, Address: req.RaftAddr}
+
+	if s.broker.Raft.IsLeader() {
+		// Propose the membership change through the Raft log so every node learns
+		// about the new peer atomically.
+		_, _, ok := s.broker.Raft.Propose(raft.MembershipChangeCmd{Op: "add", Peer: peer})
+		if !ok {
+			http.Error(w, "propose failed: no longer leader", http.StatusServiceUnavailable)
+			return
+		}
+		// Eagerly record the new node's admin URL if provided.
+		if req.AdminAddr != "" {
+			s.broker.Raft.RecordPeerAdmin(req.PeerID, req.AdminAddr)
+		}
+		log.Printf("[admin] Join: added peer %s (%s) to cluster via Raft log", req.PeerID, req.RaftAddr)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "leader_id": s.broker.Raft.ID})
+		return
+	}
+
+	// Not the leader – forward the request to the leader's admin URL.
+	leaderID := s.broker.Raft.GetLeaderID()
+	if leaderID == "" {
+		http.Error(w, "no leader elected yet, retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	peerAdmins := s.broker.Raft.PeerAdminAddrs()
+	leaderAdminURL, ok := peerAdmins[leaderID]
+	if !ok {
+		http.Error(w, "leader admin URL not yet discovered, retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	body, _ := json.Marshal(req)
+	resp, err := s.httpClient.Post(leaderAdminURL+"/api/cluster/join", "application/json", bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, "forward to leader failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // buildAPIResponse assembles a full metrics response from the metrics store and broker state.

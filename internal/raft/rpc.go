@@ -77,3 +77,11 @@ type PartitionLeaderAssignment struct {
 type LeaderAssignmentCmd struct {
 	Assignments []PartitionLeaderAssignment
 }
+
+// MembershipChangeCmd adds or removes a Raft peer from the cluster.
+// Proposed via POST /api/cluster/join and applied by every node so they all
+// update their peer list atomically through the log.
+type MembershipChangeCmd struct {
+	Op   string // "add" | "remove"
+	Peer Peer
+}

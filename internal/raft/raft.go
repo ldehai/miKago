@@ -486,6 +486,37 @@ func (r *Raft) GetLeaderID() string {
 	return r.currentLeaderID
 }
 
+// IsLeader returns true if this node is currently the Raft leader.
+func (r *Raft) IsLeader() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state == Leader
+}
+
+// AddPeer adds a new peer to the cluster. Idempotent: silently skips if the
+// peer is already present. On the leader it also initialises per-peer
+// replication state so the heartbeat loop begins replicating immediately.
+func (r *Raft) AddPeer(p Peer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.Peers {
+		if existing.ID == p.ID {
+			return
+		}
+	}
+	r.Peers = append(r.Peers, p)
+	if r.state == Leader {
+		r.nextIndex[p.ID] = r.getLastLogIndex() + 1
+		r.matchIndex[p.ID] = 0
+	}
+	log.Printf("[Raft %s] Added peer %s (%s) to cluster", r.ID, p.ID, p.Address)
+}
+
+// RecordPeerAdmin stores a discovered peer admin URL (exported for use outside the package).
+func (r *Raft) RecordPeerAdmin(nodeID, addr string) {
+	r.recordPeerAdmin(nodeID, addr)
+}
+
 // ActivePeerIDs returns the IDs of peers that responded to heartbeats within the given threshold.
 func (r *Raft) ActivePeerIDs(threshold time.Duration) []string {
 	r.mu.Lock()
