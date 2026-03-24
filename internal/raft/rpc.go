@@ -58,3 +58,16 @@ func (args *AppendEntriesArgs) String() string {
 	return fmt.Sprintf("AppendEntries(Term:%d, Leader:%s, PrevLogIdx:%d, EntriesCnt:%d, CommitIdx:%d)",
 		args.Term, args.LeaderID, args.PrevLogIndex, len(args.Entries), args.LeaderCommit)
 }
+
+// PartitionLeaderAssignment assigns a leader broker to a specific topic-partition.
+type PartitionLeaderAssignment struct {
+	Topic       string
+	PartitionID int32
+	BrokerID    int32
+}
+
+// LeaderAssignmentCmd is a Raft command that assigns partition leaders to brokers.
+// Proposed by the Controller (Raft leader) and applied by all nodes.
+type LeaderAssignmentCmd struct {
+	Assignments []PartitionLeaderAssignment
+}

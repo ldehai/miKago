@@ -28,6 +28,9 @@ func main() {
 	retentionHours := flag.Int64("retention-hours", 168, "Data retention in hours (default: 168 = 7 days, -1 = forever)")
 	raftPort := flag.Int("raft-port", 0, "Raft RPC port (0 to disable cluster mode)")
 	peersStr := flag.String("peers", "", "Comma-separated list of raft peers (e.g., 1@localhost:8001,2@localhost:8002)")
+	// --cluster-brokers lists ALL brokers' Kafka endpoints for metadata and partition assignment.
+	// Format: id@host:kafkaPort (e.g., 0@localhost:9092,1@localhost:9093,2@localhost:9094)
+	clusterBrokersStr := flag.String("cluster-brokers", "", "Comma-separated list of all cluster brokers (e.g., 0@localhost:9092,1@localhost:9093)")
 	flag.Parse()
 
 	// Banner
@@ -53,6 +56,29 @@ func main() {
 		}
 	}
 
+	// Parse cluster broker endpoints for metadata and partition leader assignment.
+	var knownBrokers []broker.ClusterBroker
+	if *clusterBrokersStr != "" {
+		for _, entry := range strings.Split(*clusterBrokersStr, ",") {
+			parts := strings.SplitN(entry, "@", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			var id, port32 int
+			hostPort := strings.SplitN(parts[1], ":", 2)
+			if len(hostPort) != 2 {
+				continue
+			}
+			fmt.Sscanf(parts[0], "%d", &id)
+			fmt.Sscanf(hostPort[1], "%d", &port32)
+			knownBrokers = append(knownBrokers, broker.ClusterBroker{
+				ID:   int32(id),
+				Host: hostPort[0],
+				Port: int32(port32),
+			})
+		}
+	}
+
 	cfg := broker.Config{
 		BrokerID:        int32(*brokerID),
 		Host:            *host,
@@ -64,6 +90,7 @@ func main() {
 		RetentionMs:     *retentionHours * 60 * 60 * 1000, // hours → ms
 		RaftPort:        int32(*raftPort),
 		RaftPeers:       peers,
+		KnownBrokers:    knownBrokers,
 	}
 
 	// Initialize components
