@@ -97,16 +97,22 @@ type Server struct {
 	peerURLs   []string     // other brokers' admin base URLs e.g. "http://host:8081"
 	httpClient *http.Client // used to fan-out to peer admin endpoints
 	httpSrv    *http.Server
+
+	// peerIDCache remembers the last known BrokerID for each admin URL.
+	// This lets us show the correct node name even when a peer is offline.
+	peerIDCache map[string]int32
+	peerIDMu    sync.RWMutex
 }
 
 // New creates an admin Server. Pass peer admin base-URLs (e.g. "http://host:8081")
 // to enable the cluster-wide dashboard; pass nil for single-node mode.
 func New(addr string, store *metrics.Store, b *broker.Broker, peerURLs []string) *Server {
 	return &Server{
-		addr:     addr,
-		store:    store,
-		broker:   b,
-		peerURLs: peerURLs,
+		addr:        addr,
+		store:       store,
+		broker:      b,
+		peerURLs:    peerURLs,
+		peerIDCache: make(map[string]int32),
 		httpClient: &http.Client{
 			Timeout: 2 * time.Second,
 		},
@@ -215,7 +221,12 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 			wg.Add(1)
 			go func(url string) {
 				defer wg.Done()
-				entry := brokerEntry{AdminURL: url}
+				// Pre-fill BrokerID from cache so offline nodes show the right name.
+				s.peerIDMu.RLock()
+				cachedID := s.peerIDCache[url]
+				s.peerIDMu.RUnlock()
+				entry := brokerEntry{AdminURL: url, BrokerID: cachedID}
+
 				resp, err := s.httpClient.Get(url + "/api/metrics")
 				if err != nil {
 					entry.Error = err.Error()
@@ -232,6 +243,10 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 					entry.Online = true
 					entry.BrokerID = m.BrokerID
 					entry.Metrics = &m
+					// Update cache with the freshly confirmed ID.
+					s.peerIDMu.Lock()
+					s.peerIDCache[url] = m.BrokerID
+					s.peerIDMu.Unlock()
 				}
 				mu.Lock()
 				entries = append(entries, entry)
