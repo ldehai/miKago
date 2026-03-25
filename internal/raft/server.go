@@ -53,7 +53,12 @@ func (rw *RaftRPCWrapper) RequestVote(args *RequestVoteArgs, reply *RequestVoteR
 	if (rw.rf.votedFor == "" || rw.rf.votedFor == args.CandidateID) && upToDate {
 		// Grant vote
 		rw.rf.votedFor = args.CandidateID
-		rw.rf.electionTimer.Reset(randomElectionDuration()) // Reset timer since we granted a vote
+		// Also push a heartbeat signal so this node doesn't immediately start
+		// its own election after granting the vote.
+		select {
+		case rw.rf.heartbeatCh <- struct{}{}:
+		default:
+		}
 
 		reply.Term = rw.rf.currentTerm
 		reply.VoteGranted = true
@@ -86,8 +91,13 @@ func (rw *RaftRPCWrapper) AppendEntries(args *AppendEntriesArgs, reply *AppendEn
 		return nil
 	}
 
-	// Recognize the leader and reset election timer
-	rw.rf.electionTimer.Reset(randomElectionDuration())
+	// Signal the follower run loop that a valid heartbeat was received.
+	// Non-blocking send: if the channel already has a token buffered, the
+	// follower loop hasn't drained it yet, which is fine — one signal is enough.
+	select {
+	case rw.rf.heartbeatCh <- struct{}{}:
+	default:
+	}
 	rw.rf.currentLeaderID = args.LeaderID // track who the current leader is
 
 	if args.Term > rw.rf.currentTerm {

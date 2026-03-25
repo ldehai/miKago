@@ -94,8 +94,8 @@ type Raft struct {
 	matchIndex map[string]int
 
 	// Timers and channels
-	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
+	heartbeatCh    chan struct{} // receives a token from AppendEntries on each valid heartbeat
 	ApplyCh        chan ApplyMsg
 
 	// Partition-level leader election support
@@ -140,14 +140,12 @@ func NewRaft(id string, peers []Peer) *Raft {
 		nextIndex:    make(map[string]int),
 		matchIndex:   make(map[string]int),
 		ApplyCh:        make(chan ApplyMsg, 100),
+		heartbeatCh:    make(chan struct{}, 1), // buffered 1: non-blocking send from AppendEntries
 		peerLastSeen:   make(map[string]time.Time),
 		peerAdminAddrs: make(map[string]string),
 		done:           make(chan struct{}),
 	}
 
-	// Start the election timer (random duration between 150ms and 300ms)
-	r.electionTimer = time.NewTimer(randomElectionDuration())
-	
 	// Start the background loop to handle state transitions
 	go r.run()
 
@@ -165,8 +163,6 @@ func (r *Raft) Stop() {
 	case <-r.done:
 	default:
 		close(r.done)
-		// Wake up any timer-blocked goroutine so it can see done and exit.
-		r.electionTimer.Reset(0)
 	}
 }
 
@@ -195,16 +191,35 @@ func (r *Raft) run() {
 }
 
 func (r *Raft) runFollower() {
-	select {
-	case <-r.electionTimer.C:
-	case <-r.done:
-		return
-	}
+	// Use a fresh local timer each call; reset it whenever a valid heartbeat
+	// arrives via heartbeatCh. This avoids the concurrent-Reset race that
+	// plagued the old shared electionTimer approach.
+	timer := time.NewTimer(randomElectionDuration())
+	defer timer.Stop()
 
-	// Election timeout elapsed without receiving heartbeat. Start an election.
-	r.mu.Lock()
-	r.becomeCandidate()
-	r.mu.Unlock()
+	for {
+		select {
+		case <-timer.C:
+			// Timeout elapsed with no heartbeat → start election.
+			r.mu.Lock()
+			r.becomeCandidate()
+			r.mu.Unlock()
+			return
+
+		case <-r.heartbeatCh:
+			// Valid heartbeat received; reset the timeout window.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(randomElectionDuration())
+
+		case <-r.done:
+			return
+		}
+	}
 }
 
 func (r *Raft) runCandidate() {
@@ -260,9 +275,11 @@ func (r *Raft) runCandidate() {
 		}(peer)
 	}
 
-	// For now, if timeout hits again while candidate, we restart the election loop.
+	// Wait for election timeout; if still candidate, start a new election round.
+	timer := time.NewTimer(randomElectionDuration())
+	defer timer.Stop()
 	select {
-	case <-r.electionTimer.C:
+	case <-timer.C:
 	case <-r.done:
 		return
 	}
@@ -409,7 +426,6 @@ func (r *Raft) becomeFollower(term int) {
 	r.state = Follower
 	r.currentTerm = term
 	r.votedFor = ""
-	r.electionTimer.Reset(randomElectionDuration())
 	metrics.Default.RaftTerm.Store(int64(term))
 
 	if wasLeader && r.OnLeaderChange != nil {
@@ -430,8 +446,6 @@ func (r *Raft) becomeCandidate() {
 	metrics.Default.RaftElections.Add(1)
 	metrics.Default.RaftTerm.Store(int64(r.currentTerm))
 
-	// Reset election timer so we don't block forever if election splits.
-	r.electionTimer.Reset(randomElectionDuration())
 }
 
 // becomeLeader transit node to Leader state.
